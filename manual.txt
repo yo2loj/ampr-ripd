@@ -1,0 +1,72 @@
+ ***************************************************************
+ *                                                             *
+ *  ampr-ripd.c - AMPR 44net RIPv2 Listner and Route Injector  *
+ *                                                             *
+ ***************************************************************
+
+ Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
+
+
+ Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-f <interface>] [-e <ip>]
+
+ Options:
+          -?, -h                usage info
+          -d                    debug mode: no daemonization, verbose output
+          -v                    more verbose debug output
+          -s                    save routes to /var/lib/ampr-ripd/encap.txt (encap format),
+                                if this file exists, it will be loaded on startup regardless
+                                of this option
+          -r                    use raw socket instead of multicast
+          -i <interface>        tunnel interface to use, defaults to tunl0
+          -t <table>            routing table to use, defaults to 'main'
+          -a  <ip>[,<ip>...]    comma separated list of IPs to be ignored
+                                list contains local interface IPs by default
+          -p <password>         RIPv2 password, defaults to none
+          -f <interface>        interface for RIP forwarding, defaults to none/disabled
+          -e <ip>               forward destination IP, defaults to 224.0.0.9 if enabled
+
+ Observation: All routes are created with protocol 44 for easy management
+
+
+ ************************************************************************
+ * This program is free software; you can redistribute it and/or modify *
+ * it under the terms of the GNU General Public License as published by *
+ * the Free Software Foundation; either version 2 of the License, or    *
+ * (at your option) any later version.                                  *
+ *                                                                      *
+ * This program is distributed in the hope that it will be useful,      *
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of       *
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the        *
+ * GNU General Public License for more details.                         *
+ *                                                                      *
+ * You should have received a copy of the GNU General Public License    *
+ * along with this program; if not, write to the Free Software          *
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.            *
+ ************************************************************************
+
+ * Version History
+ * --------------------------------------------------------------------
+ *    0.9     14.Apr.2013      Alpha version, based on Hessus's rip44d
+ *    1.0      1.Aug.2013      First functional version, no tables, no TCP window setting
+ *    1.1      1.Aug.2013      Fully functional version
+ *    1.2      3.Aug.2013      Added option for using raw sockets instead of multicast
+ *    1.3      7.Aug.2013      Minor bug fix, removed compiler warnings
+ *    1.4      8.Aug,2013      Possible buffer overflow fixed
+ *                             Reject metrics 15 packets fixed
+
+
+ INSTALLATION
+ ------------
+ -Compile with: gcc -O2 -o ampr-ripd ampr-ripd.c or use the make script
+ -Copy the file ampr-ripd to a proper location, e.g. /usr/sbin
+ -Create the folder /var/lib/ampr-ripd
+ -Launch with proper parameters as described above
+Or:
+ -Just do a 'make install' in the source folder.
+
+ KNOWN ISSUES
+ ------------
+ - when using other table than 'main', interogating the routes via netlink does not work properly.
+   This means that on any update, the route is deleted and than recreated, even if it is already set correctly.
+   This should be no problem since this happen only at startup on encap loading and on route changes.
+
