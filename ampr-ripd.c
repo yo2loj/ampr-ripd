@@ -53,6 +53,7 @@
  *    1.3     7.Aug.2013    Minor bug fix, removed compiler warnings
  *    1.4     8.Aug.2013    Possible buffer overflow fixed
  *                          Reject metric 15 packets fixed
+ *    1.5    10.Aug.2013    Corrected a stupid netmask calculation error introduced in v1.4
  */
 
 #include <stdlib.h>
@@ -78,6 +79,7 @@
 #include <time.h>
 #include <ctype.h>
 
+//#define NL_DEBUG
 
 #define RTSIZE		1000	/* maximum number of route entries */
 #define EXPTIME		600	/* route expiration in seconds */
@@ -160,7 +162,7 @@ typedef struct
 } route_entry;
 
 
-static char *usage_string = "\nAMPR RIPv2 daemon v1.4 by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-t <table>] [-f <interface>] [-e <ip>]\n";
+static char *usage_string = "\nAMPR RIPv2 daemon v1.5 by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-t <table>] [-f <interface>] [-e <ip>]\n";
 
 
 int debug = FALSE;
@@ -665,7 +667,7 @@ int rta_addattr_len(struct rtattr *rta, int maxlen, int type, const void *data, 
     return 0;
 }
 
-
+#ifdef NL_DEBUG
 void nl_debug(void *msg, int len)
 {
     struct rtattr *rtattr;
@@ -732,7 +734,7 @@ void nl_debug(void *msg, int len)
 	}
     }
 }
-
+#endif
 
 uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint32_t nexthop)
 {
@@ -831,10 +833,10 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
         if (debug) fprintf(stderr, "Can not bind to netlink socket.\n");
 	return 0;
     }
-
+#ifdef NL_DEBUG
     if (debug && verbose) fprintf(stderr, "NL sending request.\n");
     nl_debug(&req, req.hdr.nlmsg_len);
-
+#endif
     if (send(nlsd, &req, req.hdr.nlmsg_len, 0) < 0)
     {
 	if (debug) fprintf(stderr, "Can not talk to rtnetlink.\n");
@@ -842,9 +844,10 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
 
     if ((len = recv(nlsd, nlrxbuf, sizeof(nlrxbuf), MSG_DONTWAIT|MSG_PEEK)) > 0)
     {
+#ifdef NL_DEBUG
 	if (debug && verbose) fprintf(stderr, "NL response received.\n");
 	nl_debug(nlrxbuf, len);
-
+#endif
 	if (ROUTE_GET == action)
 	{
 	    /* parse response for ROUTE_GET */
@@ -978,8 +981,8 @@ void process_entry(char *buf)
 	    if (rip->mask & mask)
 	    {
 		netmask++;
-		mask <<= 1;
 	    }
+	    mask <<= 1;
 	}
 
 	if (debug && verbose)
