@@ -4,10 +4,10 @@
  *                                                             *
  ***************************************************************
 
- Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
+ Copyright (C) 2013 Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>.
 
 
- Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-f <interface>] [-e <ip>]
+ Usage: ampr-ripd [-?|-h] [-d] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-f <interface>] [-e <ip>]
 
  Options:
           -?, -h                usage info
@@ -16,9 +16,7 @@
           -s                    save routes to /var/lib/ampr-ripd/encap.txt (encap format),
                                 if this file exists, it will be loaded on startup regardless
                                 of this option
-          -r                    use raw socket instead of multicast
           -i <interface>        tunnel interface to use, defaults to tunl0
-          -t <table>            routing table to use, defaults to 'main'
           -a  <ip>[,<ip>...]    comma separated list of IPs to be ignored
                                 list contains local interface IPs by default
           -p <password>         RIPv2 password, defaults to none
@@ -47,27 +45,17 @@
  * Version History
  * --------------------------------------------------------------------
  *    0.9     14.Apr.2013      Alpha version, based on Hessus's rip44d
- *    1.0      1.Aug.2013      First functional version, no tables, no TCP window setting
- *    1.1      1.Aug.2013      Fully functional version
- *    1.2      3.Aug.2013      Added option for using raw sockets instead of multicast
- *    1.3      7.Aug.2013      Minor bug fix, removed compiler warnings
- *    1.4      8.Aug,2013      Possible buffer overflow fixed
- *                             Reject metrics 15 packets fixed
- *    1.5     10.Aug.2013      Corrected a stupid netmask calculation error introduced in v1.4
- *    1.6     10.Oct.2013      Changed multicast setup procedures to be interface specific (Tnx. Rob, PE1CHL)
+ *    1.0      1.Aug.2013      First fully functional version
+ *
 
  INSTALLATION
  ------------
- -Compile with: gcc -O2 -o ampr-ripd ampr-ripd.c or use the make script
- -Copy the file ampr-ripd to a proper location, e.g. /usr/sbin
+ -Compile with: gcc -Wall -O6 -o ampr-ripd ampr-ripd.c or use the make script
  -Create the folder /var/lib/ampr-ripd
  -Launch with proper parameters as described above
-Or:
- -Just do a 'make install' in the source folder.
 
  KNOWN ISSUES
  ------------
- - when using other table than 'main', interogating the routes via netlink does not work properly.
-   This means that on any update, the route is deleted and than recreated, even if it is already set correctly.
-   This should be no problem since this happen only at startup on encap loading and on route changes.
-
+ - Support for table selection is not available yet
+   (parameter -t is accepted but has no effect)
+ - TCP Window setting to 840 is not implemented yet

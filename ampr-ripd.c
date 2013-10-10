@@ -1,14 +1,12 @@
 /*
- * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.6
+ * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.0
  *
- * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
+ * Copyright (C) 2013 Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>.
  *
- *
- *
- * Compile with: gcc -O2 -o ampr-ripd ampr-ripd.c
+ * Compile with: gcc -Wall -O6 -o ampr-ripd ampr-ripd.c
  *
  *
- * Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-f <interface>] [-e <ip>]
+ * Usage: ampr-ripd [-?|-h] [-d] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-f <interface>] [-e <ip>]
  *
  * Options:
  *          -?, -h                usage info
@@ -17,9 +15,7 @@
  *          -s                    save routes to /var/lib/ampr-ripd/encap.txt (encap format),
  *                                if this file exists, it will be loaded on startup regardless
  *                                of this option
- *          -r                    use raw socket instead of multicast
- *          -i <interface>        tunnel interface to use, defaults to 'tunl0'
- *          -t <table>            routing table to use, defaults to 'main'
+ *          -i <interface>        tunnel interface to use, defaults to tunl0
  *          -a  <ip>[,<ip>...]    comma separated list of IPs to be ignored
  *                                list contains local interface IPs by default
  *          -p <password>         RIPv2 password, defaults to none
@@ -46,15 +42,8 @@
  *
  * Version History
  * ---------------
- *    0.9    14.Apr.2013    Alpha release, based on Hessus's rip44d
- *    1.0     1.Aug.2013    First functional version, no tables, no tcp window setting
- *    1.1     1.Aug.2013    Fully functional version
- *    1.2     3.Aug.2013    Added option for using raw sockets instead of multicast
- *    1.3     7.Aug.2013    Minor bug fix, removed compiler warnings
- *    1.4     8.Aug.2013    Possible buffer overflow fixed
- *                          Reject metric 15 packets fixed
- *    1.5    10.Aug.2013    Corrected a stupid netmask calculation error introduced in v1.4
- *    1.6    10.Oct.2013    Changed multicast setup procedures to be interface specific (Tnx. Rob, PE1CHL)
+ * 	0.9	14.Apr.2013	alpha release, based on Hessus's rip44d
+ *
  */
 
 #include <stdlib.h>
@@ -73,23 +62,17 @@
 #include <linux/rtnetlink.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <netinet/ip.h>
-#include <netinet/udp.h>
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <time.h>
-#include <ctype.h>
 
-//#define NL_DEBUG
 
 #define RTSIZE		1000	/* maximum number of route entries */
 #define EXPTIME		600	/* route expiration in seconds */
 
 #define RTFILE		"/var/lib/ampr-ripd/encap.txt"	/* encap file */
 
-#define RTAB_FILE	"/etc/iproute2/rt_tables"	/* route tables */
-
-#define	BUFFERSIZE	8192
+#define	BUFFERSIZE	4096
 #define MYIPSIZE	25	/* max number of local interface IPs */
 
 #define FALSE	0
@@ -105,11 +88,16 @@
 
 #define RTPROT_AMPR		44
 
-#define PERROR(s)				fprintf(stderr, "%s: %s\n", (s), strerror(errno))
-#define rip_pcmd(cmd)				((cmd==1)?("Request"):((cmd==2)?("Response"):("Unknown")))
-#define NLMSG_TAIL(nmsg)			((struct rtattr *) (((void *) (nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
-#define addattr32(n, maxlen, type, data) 	addattr_len(n, maxlen, type, &data, 4)
-#define rta_addattr32(rta, maxlen, type, data)	rta_addattr_len(rta, maxlen, type, &data, 4)
+#define rip_pcmd(cmd)		((cmd==1)?("Request"):((cmd==2)?("Response"):("Unknown")))
+
+#define NLMSG_TAIL(nmsg)	((struct rtattr *) (((void *) (nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
+
+typedef enum
+{
+    ROUTE_ADD,
+    ROUTE_DEL,
+    ROUTE_GET
+} rt_actions;
 
 /* uncomment if types not available */
 /*
@@ -121,13 +109,6 @@ typedef signed short		sint16_t;
 typedef signed int		sint32_t;
 
 */
-
-typedef enum
-{
-    ROUTE_ADD,
-    ROUTE_DEL,
-    ROUTE_GET
-} rt_actions;
 
 typedef struct __attribute__ ((__packed__))
 {
@@ -154,7 +135,7 @@ typedef struct __attribute__ ((__packed__))
     uint8_t pass[16];
 } rip_auth;
 
-typedef struct
+typedef struct s_route_entry
 {
     uint32_t address;
     uint32_t netmask;
@@ -163,32 +144,31 @@ typedef struct
 } route_entry;
 
 
-static char *usage_string = "\nAMPR RIPv2 daemon v1.6 by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-t <table>] [-f <interface>] [-e <ip>]\n";
+static char *usage_string = "Usage: ampr-ripd [-d] [-v] [-s] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-t <table>] [-f <interface>] [-e <ip>]\n";
 
 
 int debug = FALSE;
 int verbose = FALSE;
 int save = FALSE;
-int raw = FALSE;
 char *tunif = "tunl0";
-unsigned int tunidx = 0;
+char tunidx = 0;
 unsigned int tunaddr;
 char *ilist = NULL;
 char *passwd = NULL;
 char *table = NULL;
-int nrtable;
 char *fwif = NULL;
 char *fwdest = "224.0.0.9";
 
 int tunsd;
 int fwsd;
-int seq;
+
 int updated = FALSE;
 
 route_entry routes[RTSIZE];
 
-uint32_t myips[MYIPSIZE];
+uint32_t myips[25];
 
+#define PERROR(s)	fprintf(stderr, "%s: %s\n", (s), strerror(errno))
 
 uint32_t getip(const char *dev)
 {
@@ -209,18 +189,20 @@ uint32_t getip(const char *dev)
 void set_multicast(int sockfd, const char *dev)
 {
     struct ifreq ifr;
+    int res;
 
     memset(&ifr, 0, sizeof(struct ifreq));
     strcpy(ifr.ifr_name, dev);
 
-    if (ioctl(sockfd, SIOCGIFFLAGS, &ifr)< 0)
+    res = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
+    if (res < 0)
     {
 	return;
     }
 
     ifr.ifr_flags |= IFF_MULTICAST;
 
-    ioctl(sockfd, SIOCSIFFLAGS, &ifr);
+    res = ioctl(sockfd, SIOCSIFFLAGS, &ifr);
 
     return;
 }
@@ -235,7 +217,7 @@ char *ipv4_htoa(unsigned int ip)
 char *ipv4_ntoa(unsigned int ip)
 {
     unsigned int lip = ntohl(ip);
-    return ipv4_htoa(lip);
+    ipv4_htoa(lip);
 }
 
 char *ipv4_ntoa_encap(int idx)
@@ -255,85 +237,6 @@ char *ipv4_ntoa_encap(int idx)
 	}
     }
     return buf;
-}
-
-void set_rt_table(char *arg)
-{
-    FILE *rtf;
-    char buffer[255];
-    char sbuffer[255];
-    char *p;
-    int i;
-
-    if (NULL == arg)
-    {
-	nrtable =  RT_TABLE_MAIN;
-	if (debug) fprintf(stderr, "Using routing table 'main' (%d).\n", nrtable);
-    }
-    else if (strcmp("default", arg) == 0)
-    {
-	nrtable =  RT_TABLE_DEFAULT;
-	if (debug) fprintf(stderr, "Using routing table 'default' (%d).\n", nrtable);
-    }
-    else if (strcmp("main", arg) == 0)
-    {
-	nrtable =  RT_TABLE_MAIN;
-	if (debug) fprintf(stderr, "Using routing table 'main' (%d).\n", nrtable);
-    }
-    else if (strcmp("local", arg) == 0)
-    {
-	nrtable =  RT_TABLE_LOCAL;
-	if (debug) fprintf(stderr, "Using routing table 'local' (%d).\n", nrtable);
-    }
-    else
-    {
-	/* check for a number */
-	for (i=0; i<strlen(arg); i++)
-	{
-	    if (!isdigit(arg[i]))
-		break;
-	}
-
-	if (i==strlen(arg)) /* we are all digits */
-	{
-	    if (1 != sscanf(arg, "%d", &nrtable))
-	    {
-		/* fallback */
-		nrtable = RT_TABLE_MAIN;
-		if (debug) fprintf(stderr, "Can not find routing table '%s'. Assuming table 'main' (%d)", table, nrtable);
-	    }
-	    if (debug) fprintf(stderr, "Using routing table (%d).\n", nrtable);
-	}
-	else /* we have a table name  */
-	{
-	    rtf = fopen(RTAB_FILE, "r");
-	    if (NULL == rtf)
-	    {
-		if (debug) fprintf(stderr, "Can not open routing table file '%s'. Assuming table main (254)\n", RTAB_FILE);
-		nrtable = RT_TABLE_MAIN;
-	    }
-
-	    while (fgets(buffer, 255, rtf) != NULL)
-	    {
-		if ((buffer[0]!='#') && (p = strstr(buffer, table)) != NULL)
-		{
-		    if (2 == sscanf(buffer, "%d %s", &nrtable, (char *)&sbuffer))
-		    {
-			if (0 == strcmp(table, sbuffer))
-			{
-			    if (debug) fprintf(stderr, "Using routing table '%s' (%d).\n", table, nrtable);
-			    return;
-			}
-		    }
-		}
-		p = NULL;
-		continue;
-	    }
-	    nrtable = RT_TABLE_MAIN;
-	    if (debug) fprintf(stderr, "Can not find routing table %s. Assuming table 'main' (%d)", table, nrtable);
-	    fclose (rtf);
-	}
-    }
 }
 
 void detect_myips(void)
@@ -362,7 +265,7 @@ void detect_myips(void)
 	if (strcmp(names[i].if_name, tunif) == 0)
 	{
 	    tunidx = names[i].if_index;
-	    if (debug && verbose) fprintf(stderr, "Assigned tunnel interface index: %u\n", tunidx);
+	    if (debug && verbose) fprintf(stderr, "Assigned tunnel interface index: %d\n", tunidx);
 	}
 
 	/* check if address not already there */
@@ -557,8 +460,6 @@ void save_encap(void)
 		}
 	}
 
-	fprintf(efd, "# --EOF--\n");
-
 	fclose(efd);
 	
 	updated = FALSE;
@@ -632,9 +533,9 @@ void load_encap(void)
 	fclose(efd);
 }
 
-int addattr_len(struct nlmsghdr *n, int maxlen, int type, const void *data, int alen)
+int addattr(struct nlmsghdr *n, int maxlen, int type, uint32_t data)
 {
-    int len = RTA_LENGTH(alen);
+    int len = RTA_LENGTH(4);
     struct rtattr *rta;
 
     if ((NLMSG_ALIGN(n->nlmsg_len) + len) > maxlen)
@@ -645,30 +546,13 @@ int addattr_len(struct nlmsghdr *n, int maxlen, int type, const void *data, int 
     rta = NLMSG_TAIL(n);
     rta->rta_type = type;
     rta->rta_len = len;
-    memcpy(RTA_DATA(rta), data, len);
+    memcpy(RTA_DATA(rta), &data, 4);
     n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + len;
     return 0;
 }
 
-int rta_addattr_len(struct rtattr *rta, int maxlen, int type, const void *data, int alen)
-{
-    struct rtattr *subrta;
-    int len = RTA_LENGTH(alen);
-    if ((RTA_ALIGN(rta->rta_len) + RTA_ALIGN(len)) > maxlen)
-    {
-	if (debug) fprintf(stderr, "Max allowed length exceeded during sub-RTA assembly.\n");
-	return -1;
-    }
+int seq;
 
-    subrta = (struct rtattr *)(((void *)rta) + RTA_ALIGN(rta->rta_len));
-    subrta->rta_type = type;
-    subrta->rta_len = len;
-    memcpy(RTA_DATA(subrta), data, alen);
-    rta->rta_len = NLMSG_ALIGN(rta->rta_len) + RTA_ALIGN(len);
-    return 0;
-}
-
-#ifdef NL_DEBUG
 void nl_debug(void *msg, int len)
 {
     struct rtattr *rtattr;
@@ -707,15 +591,15 @@ void nl_debug(void *msg, int len)
 		{
 		    if (RTM_NEWROUTE == rh->nlmsg_type)
 		    {
-			c = (unsigned char *)"request new route/route info (24)";
+			c = "request new route/route info (24)";
 		    }
 		    else if (RTM_DELROUTE == rh->nlmsg_type)
 		    {
-			c = (unsigned char *)"delete route (25)";
+			c = "delete route (25)";
 		    }
 		    else /* RTM_GETROUTE */
 		    {
-			c = (unsigned char *)"get route (26)";
+			c = "get route (26)";
 		    }
 
 		    fprintf(stderr, "NLMSG: %s\n", c);
@@ -735,7 +619,7 @@ void nl_debug(void *msg, int len)
 	}
     }
 }
-#endif
+
 
 uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint32_t nexthop)
 {
@@ -744,7 +628,6 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     int len;
 
     char nlrxbuf[4096];
-    char mxbuf[256];
 
     struct {
 	struct nlmsghdr hdr;
@@ -752,18 +635,12 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
 	char buf[1024];
     } req;
 
-    struct rtattr *mxrta = (void *)mxbuf;
-
     struct sockaddr_nl sa;
     struct rtattr *rtattr;
     struct nlmsghdr *rh;
     struct rtmsg *rm;
 
     uint32_t result = 0;
-    uint32_t window = 840;
-
-    mxrta->rta_type = RTA_METRICS;
-    mxrta->rta_len = RTA_LENGTH(0);
 
     memset(&req, 0, sizeof(req));
 
@@ -778,15 +655,7 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     req.hdr.nlmsg_pid = getpid();
     req.rtm.rtm_family = AF_INET;
     req.rtm.rtm_dst_len = netmask;
-
-    if (NULL == table)
-    {
-        req.rtm.rtm_table = RT_TABLE_MAIN;
-    }
-    else
-    {
-        req.rtm.rtm_table = nrtable;
-    }
+    req.rtm.rtm_table = RT_TABLE_MAIN;
 
     if (ROUTE_DEL == action)
     {
@@ -801,7 +670,7 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     {
 	req.rtm.rtm_flags |= RTNH_F_ONLINK;
 	req.rtm.rtm_protocol = RTPROT_AMPR;
-	
+	req.rtm.rtm_scope = RT_SCOPE_UNIVERSE;
 	req.rtm.rtm_type = RTN_UNICAST;
 	req.hdr.nlmsg_type = RTM_NEWROUTE;
 	req.hdr.nlmsg_flags |= NLM_F_CREATE;
@@ -810,64 +679,62 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     else
     {
 	req.hdr.nlmsg_type = RTM_GETROUTE;
-	req.rtm.rtm_scope = RT_SCOPE_UNIVERSE;
     }
 
-    addattr32(&req.hdr, sizeof(req), RTA_DST, address);
-
+    addattr(&req.hdr, sizeof(req), RTA_DST, address);
     if (ROUTE_ADD == action)
     {
-	if (0 != nexthop) addattr32(&req.hdr, sizeof(req), RTA_GATEWAY, nexthop); /* gateway */
-	addattr32(&req.hdr, sizeof(req), RTA_OIF, tunidx); /* dev */
-	rta_addattr32(mxrta, sizeof(mxbuf), RTAX_WINDOW, window);
-	addattr_len(&req.hdr, sizeof(req), RTA_METRICS, RTA_DATA(mxrta), RTA_PAYLOAD(mxrta));
+	if (0 != nexthop) addattr(&req.hdr, sizeof(req), RTA_GATEWAY, nexthop); /* gateway */
+	addattr(&req.hdr, sizeof(req), RTA_OIF, tunidx); /* dev */
     }
 
     if ((nlsd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE)) < 0)
     {
 	if (debug) fprintf(stderr, "Can not open netlink socket.\n");
-	return 0;
+	return;
     }
 
     if (bind(nlsd, (struct sockaddr *)&sa, sizeof(sa)) < 0)
     {
         if (debug) fprintf(stderr, "Can not bind to netlink socket.\n");
-	return 0;
+	return;
     }
-#ifdef NL_DEBUG
+
     if (debug && verbose) fprintf(stderr, "NL sending request.\n");
     nl_debug(&req, req.hdr.nlmsg_len);
-#endif
+
     if (send(nlsd, &req, req.hdr.nlmsg_len, 0) < 0)
     {
 	if (debug) fprintf(stderr, "Can not talk to rtnetlink.\n");
     }
 
-    if ((len = recv(nlsd, nlrxbuf, sizeof(nlrxbuf), MSG_DONTWAIT|MSG_PEEK)) > 0)
+    if (len = recv(nlsd, nlrxbuf, sizeof(nlrxbuf), MSG_DONTWAIT|MSG_PEEK))
     {
-#ifdef NL_DEBUG
-	if (debug && verbose) fprintf(stderr, "NL response received.\n");
-	nl_debug(nlrxbuf, len);
-#endif
-	if (ROUTE_GET == action)
+        if (len > 0)
 	{
-	    /* parse response for ROUTE_GET */
-	    for (rh = (struct nlmsghdr *)nlrxbuf; NLMSG_OK(rh, len); rh = NLMSG_NEXT(rh, len))
+	    if (debug && verbose) fprintf(stderr, "NL response received.\n");
+	    nl_debug(nlrxbuf, len);
+
+	    if (ROUTE_GET == action)
 	    {
-		if (rh->nlmsg_type == 24) /* route info resp */
+		/* parse response for ROUTE_GET */
+		for (rh = (struct nlmsghdr *)nlrxbuf; NLMSG_OK(rh, len); rh = NLMSG_NEXT(rh, len))
 		{
-		    rm = NLMSG_DATA(rh);
-		    for (rtattr = (struct rtattr *)RTM_RTA(rm); RTA_OK(rtattr, len); rtattr = RTA_NEXT(rtattr, len))
+		    if (rh->nlmsg_type == 24) /* route info resp */
 		    {
-			if (RTA_GATEWAY == rtattr->rta_type)
+			rm = NLMSG_DATA(rh);
+			for (rtattr = (struct rtattr *)RTM_RTA(rm); RTA_OK(rtattr, len); rtattr = RTA_NEXT(rtattr, len))
 			{
-			    result = *((uint32_t *)RTA_DATA(rtattr));
+			    if (RTA_GATEWAY == rtattr->rta_type)
+			    {
+				result = *((uint32_t *)RTA_DATA(rtattr));
+			    }
 			}
 		    }
-		}
-		else if (NLMSG_ERROR == rh->nlmsg_type)
-		{
-		    result = 0;
+		    else if (NLMSG_ERROR == rh->nlmsg_type)
+		    {
+			result = 0;
+		    }
 		}
 	    }
 	}
@@ -878,6 +745,8 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
 
 void route_update(uint32_t address, uint32_t netmask, uint32_t nexthop)
 {
+	uint32_t res;
+	
 	if (route_func(ROUTE_GET, address, netmask, 0) != nexthop)
 	{
 	    route_func(ROUTE_DEL, address, netmask, 0); /* fails if route does not exist - no problem */
@@ -940,7 +809,7 @@ int process_auth(char *buf, int len, int needed)
 			return -1;
 		}
 
-		if (strncmp((char *)auth->pass, passwd, 16) != 0)
+		if (strncmp(auth->pass, passwd, 16) != 0)
 		{
 			if (debug) fprintf(stderr, "Invalid password.\n");
 			return -1;
@@ -974,16 +843,20 @@ void process_entry(char *buf)
 	}
 
 	unsigned int mask = 1;
-	unsigned int netmask = 0;
+	unsigned int netmask = 32;
 	int i;
 
-	for (i=0; i<32; i++)
+	for (i=32; i>0; i--)
 	{
-	    if (rip->mask & mask)
+	    if ((ntohl(rip->mask) & mask) == 0)
 	    {
-		netmask++;
+		netmask--;
+		mask <<= 1;
 	    }
-	    mask <<= 1;
+	    else
+	    {
+		break;
+	    }
 	}
 
 	if (debug && verbose)
@@ -1004,7 +877,7 @@ void process_entry(char *buf)
 
 	/* remove if unreachable and in list */
 
-	if (ntohl(rip->metric) > 14)
+	if (ntohl(rip->metric) > 15)
 	{
 		if (debug && verbose) fprintf(stderr, " - unreacheable");
 		if ((i = list_find(rip->address, netmask)) != -1)
@@ -1035,6 +908,9 @@ void process_entry(char *buf)
 int process_message(char *buf, int len)
 {
 	rip_header *hdr;
+
+	char *ibuf = buf;
+	int ilen = len;
 
 	if (len < RIP_HDR_LEN + RIP_ENTRY_LEN)
 	{
@@ -1116,7 +992,7 @@ int process_message(char *buf, int len)
 	if (debug) fprintf(stderr, "Processing RIPv2 packet, %d entries ", len/RIP_ENTRY_LEN);
 	if (debug && verbose) fprintf(stderr, "\n");
 
-	while (len >= RIP_ENTRY_LEN)
+	while (len > 0)
 	{
 		process_entry(buf);
 		buf += RIP_ENTRY_LEN;
@@ -1176,6 +1052,8 @@ static void on_alarm(int sig)
 
 static void on_hup(int sig)
 {
+	int i;
+
 	if (debug) fprintf(stderr, "SIGHUP received!\n");
 	
 	route_delete_all();
@@ -1187,13 +1065,9 @@ int main(int argc, char **argv)
 	int p;
 
 	struct sockaddr_in sin;
-	struct group_req group;
-	
-	char databuf[BUFFERSIZE];
-	char *pload;
-	int len, plen;
+	struct ip_mreq group;
 
-	while ((p = getopt(argc, argv, "dvsrh?i:a:p:t:f:e:")) != -1)
+	while ((p = getopt(argc, argv, "dvsh?i:a:p:t:f:e:")) != -1)
 	{
 		switch (p)
 		{
@@ -1205,9 +1079,6 @@ int main(int argc, char **argv)
 			break;
 		case 's':
 			save = TRUE;
-			break;
-		case 'r':
-			raw = TRUE;
 			break;
 		case 'i':
 			tunif = optarg;
@@ -1235,8 +1106,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-	set_rt_table(table);
-
 	list_clear();
 	load_encap();
 
@@ -1256,85 +1125,66 @@ int main(int argc, char **argv)
 
 	route_set_all();
 
-	if (TRUE == raw)
+	/* create multicast listen socket on tunnel */
+
+	if (debug) fprintf(stderr, "Creating RIP UDP listening socket.\n");
+
+	if ((tunsd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0)
 	{
-	    /* create multicast listen socket on tunnel */
-
-	    if (debug) fprintf(stderr, "Creating RIP UDP listening socket.\n");
-
-	    if ((tunsd = socket(PF_INET, SOCK_RAW, 4)) < 0)
-	    {
-		PERROR("Raw socket");
-		return 1;
-	    }
-	}
-	else
-	{
-	
-	    /* create multicast listen socket on tunnel */
-
-	    if (debug) fprintf(stderr, "Creating RIP UDP listening socket.\n");
-
-	    if ((tunsd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0)
-	    {
 		PERROR("Tunnel socket");
 		return 1;
-	    }
+	}
 
-	    if (debug && verbose) fprintf(stderr, "Setting up multicast interface.\n");
+	if (debug && verbose) fprintf(stderr, "Setting up multicast interface.\n");
 
-	    int reuse = 1;
-	    if (setsockopt(tunsd, SOL_SOCKET, SO_REUSEADDR, (char *)&reuse, sizeof(reuse)) < 0)
-	    {
+	int reuse = 1;
+	if (setsockopt(tunsd, SOL_SOCKET, SO_REUSEADDR, (char *)&reuse, sizeof(reuse)) < 0)
+	{
 		PERROR("Tunnel socket: Setting SO_REUSEADDR");
 		close(tunsd);
 		return 1;
-	    }
+	}
 
-	    if (setsockopt(tunsd, SOL_SOCKET, SO_BINDTODEVICE, tunif, strlen(tunif)) < 0)
-	    {
+	if (setsockopt(tunsd, SOL_SOCKET, SO_BINDTODEVICE, tunif, strlen(tunif)) < 0)
+	{
 		PERROR("Tunnel socket: Setting SO_BINDTODEVICE");
 		close(tunsd);
 		return 1;
-	    }
+	}
 
-	    set_multicast(tunsd, tunif);
+	set_multicast(tunsd, tunif);
 
-	    memset((char *)&sin, 0, sizeof(sin));
-	    sin.sin_family = PF_INET;
-	    sin.sin_addr.s_addr = INADDR_ANY; /* mandatory INADDR_ANY for multicast */
-	    sin.sin_port = htons(IPPORT_ROUTESERVER);
+	memset((char *)&sin, 0, sizeof(sin));
+	sin.sin_family = PF_INET;
+	sin.sin_addr.s_addr = INADDR_ANY; /* mandatory INADDR_ANY for multicast */
+	sin.sin_port = htons(IPPORT_ROUTESERVER);
 
-	    if (bind(tunsd, (struct sockaddr *)&sin, sizeof(sin)))
-	    {
+	if (bind(tunsd, (struct sockaddr *)&sin, sizeof(sin)))
+	{
 		PERROR("Tunnel socket: Bind");
 		close(tunsd);
 		return 1;
-	    }
+	}
 
-	    /* disable loopback */
-	    int loop = 0;
-	    if (setsockopt(tunsd, IPPROTO_IP, IP_MULTICAST_LOOP, (char *)&loop, sizeof(loop)) < 0)
-	    {
+	/* disable loopback */
+	int loop = 0;
+	if (setsockopt(tunsd, IPPROTO_IP, IP_MULTICAST_LOOP, (char *)&loop, sizeof(loop)) < 0)
+	{
 		PERROR("Tunnel socket: Disable loopback");
 		close(tunsd);
 		return 1;
-	    }
+	}
 
-	    /* join multicast group 224.0.0.9 */
-	    memset((char *)&group, 0, sizeof(group));
-	    memset((char *)&sin, 0, sizeof(sin));
-	    sin.sin_family = AF_INET;
-	    sin.sin_addr.s_addr = inet_addr("224.0.0.9");
-	    memcpy(&group.gr_group, &sin, sizeof(sin));
-	    group.gr_interface = tunidx;
+	/* join multicast group 224.0.0.9 */
+	memset((char *)&group, 0, sizeof(group));
+	group.imr_multiaddr.s_addr = inet_addr("224.0.0.9");
+	group.imr_interface.s_addr = tunaddr;
 
-	    if (setsockopt(tunsd, IPPROTO_IP, MCAST_JOIN_GROUP, (char *)&group, sizeof(group)) < 0)
-	    {
+	if (setsockopt(tunsd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *)&group, sizeof(group)) < 0)
+	{
 		PERROR("Tunnel socket: join multicast");
 		close(tunsd);
 		return 1;
-	    }
 	}
 
 	if (NULL != fwif)
@@ -1349,6 +1199,8 @@ int main(int argc, char **argv)
 			return 1;
 		}
 
+		set_multicast(fwsd, fwif);
+
 		if (setsockopt(fwsd, SOL_SOCKET, SO_BINDTODEVICE, fwif, strlen(fwif)) < 0)
 		{
 			PERROR("Tunnel socket: Setting SO_BINDTODEVICE");
@@ -1359,7 +1211,7 @@ int main(int argc, char **argv)
 
 		memset((char *)&sin, 0, sizeof(sin));
 		sin.sin_family = PF_INET;
-		sin.sin_addr.s_addr = INADDR_ANY;
+		sin.sin_addr.s_addr = INADDR_ANY; /* mandatory INADDR_ANY for multicast */
 		sin.sin_port = htons(IPPORT_ROUTESERVER);
 		
 		if (bind(fwsd, (struct sockaddr *)&sin, sizeof(sin)))
@@ -1405,6 +1257,8 @@ int main(int argc, char **argv)
 
 	if (debug) fprintf(stderr, "Waiting for RIPv2 broadcasts...\n");
 
+	char databuf[BUFFERSIZE];
+	int len;
 
 	while (1)
 	{
@@ -1414,42 +1268,10 @@ int main(int argc, char **argv)
 		}
 		else
 		{
-			if (TRUE == raw)
-			{
-			    if (len >= 48 + (RIP_HDR_LEN + RIP_ENTRY_LEN))
-			    {
-				struct iphdr *iph = (struct iphdr *)(databuf + 20);
-				struct udphdr *udh = (struct udphdr *)(databuf + 40);
-			
-				if ((iph->daddr == inet_addr("224.0.0.9")) &&
-				    (iph->saddr == inet_addr("44.0.0.1")) &&
-				    (udh->dest == htons(IPPORT_ROUTESERVER)) &&
-				    (udh->source == htons(IPPORT_ROUTESERVER)))
-				{
-				    pload = &databuf[48];
-				    plen = len - 48;
-				}
-				else
-				{
-				    continue;
-				}
-			    }
-			    else
-			    {
-				continue;
-			    }
-			}
-			else
-			{
-			    pload = databuf;
-			    plen = len;
-			}
-			
-			process_message(pload, plen);
-			
+			process_message(databuf, len);
 			if (NULL != fwif)
 			{
-			    sendto(fwsd, pload, plen, 0, (struct sockaddr *)&sin, sizeof(sin));
+			    sendto(fwsd, databuf, len, 0, (struct sockaddr *)&sin, sizeof(sin));
 			}
 		}
 	}
