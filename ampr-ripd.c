@@ -51,6 +51,8 @@
  *    1.1     1.Aug.2013    Fully functional version
  *    1.2     3.Aug.2013    Added option for using raw sockets instead of multicast
  *    1.3     7.Aug.2013    Minor bug fix, removed compiler warnings
+ *    1.4     8.Aug.2013    Possible buffer overflow fixed
+ *                          Reject metric 15 packets fixed
  */
 
 #include <stdlib.h>
@@ -158,7 +160,7 @@ typedef struct
 } route_entry;
 
 
-static char *usage_string = "Usage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-t <table>] [-f <interface>] [-e <ip>]\n";
+static char *usage_string = "\nAMPR RIPv2 daemon v1.4 by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-t <table>] [-f <interface>] [-e <ip>]\n";
 
 
 int debug = FALSE;
@@ -166,7 +168,7 @@ int verbose = FALSE;
 int save = FALSE;
 int raw = FALSE;
 char *tunif = "tunl0";
-char tunidx = 0;
+unsigned int tunidx = 0;
 unsigned int tunaddr;
 char *ilist = NULL;
 char *passwd = NULL;
@@ -357,7 +359,7 @@ void detect_myips(void)
 	if (strcmp(names[i].if_name, tunif) == 0)
 	{
 	    tunidx = names[i].if_index;
-	    if (debug && verbose) fprintf(stderr, "Assigned tunnel interface index: %d\n", tunidx);
+	    if (debug && verbose) fprintf(stderr, "Assigned tunnel interface index: %u\n", tunidx);
 	}
 
 	/* check if address not already there */
@@ -551,6 +553,8 @@ void save_encap(void)
 		    fprintf(efd, "%s\n", ipv4_ntoa(routes[i].nexthop));
 		}
 	}
+
+	fprintf(efd, "# --EOF--\n");
 
 	fclose(efd);
 	
@@ -966,19 +970,15 @@ void process_entry(char *buf)
 	}
 
 	unsigned int mask = 1;
-	unsigned int netmask = 32;
+	unsigned int netmask = 0;
 	int i;
 
-	for (i=32; i>0; i--)
+	for (i=0; i<32; i++)
 	{
-	    if ((ntohl(rip->mask) & mask) == 0)
+	    if (rip->mask & mask)
 	    {
-		netmask--;
+		netmask++;
 		mask <<= 1;
-	    }
-	    else
-	    {
-		break;
 	    }
 	}
 
@@ -1000,7 +1000,7 @@ void process_entry(char *buf)
 
 	/* remove if unreachable and in list */
 
-	if (ntohl(rip->metric) > 15)
+	if (ntohl(rip->metric) > 14)
 	{
 		if (debug && verbose) fprintf(stderr, " - unreacheable");
 		if ((i = list_find(rip->address, netmask)) != -1)
@@ -1112,7 +1112,7 @@ int process_message(char *buf, int len)
 	if (debug) fprintf(stderr, "Processing RIPv2 packet, %d entries ", len/RIP_ENTRY_LEN);
 	if (debug && verbose) fprintf(stderr, "\n");
 
-	while (len > 0)
+	while (len >= RIP_ENTRY_LEN)
 	{
 		process_entry(buf);
 		buf += RIP_ENTRY_LEN;
