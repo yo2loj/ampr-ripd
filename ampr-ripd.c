@@ -50,6 +50,7 @@
  *    1.0     1.Aug.2013    First functional version, no tables, no tcp window setting
  *    1.1     1.Aug.2013    Fully functional version
  *    1.2     3.Aug.2013    Added option for using raw sockets instead of multicast
+ *    1.3     7.Aug.2013    Minor bug fix, removed compiler warnings
  */
 
 #include <stdlib.h>
@@ -181,7 +182,7 @@ int updated = FALSE;
 
 route_entry routes[RTSIZE];
 
-uint32_t myips[25];
+uint32_t myips[MYIPSIZE];
 
 
 uint32_t getip(const char *dev)
@@ -229,7 +230,7 @@ char *ipv4_htoa(unsigned int ip)
 char *ipv4_ntoa(unsigned int ip)
 {
     unsigned int lip = ntohl(ip);
-    ipv4_htoa(lip);
+    return ipv4_htoa(lip);
 }
 
 char *ipv4_ntoa_encap(int idx)
@@ -311,7 +312,7 @@ void set_rt_table(char *arg)
 	    {
 		if ((buffer[0]!='#') && (p = strstr(buffer, table)) != NULL)
 		{
-		    if (2 == sscanf(buffer, "%d %s", &nrtable, &sbuffer))
+		    if (2 == sscanf(buffer, "%d %s", &nrtable, (char *)&sbuffer))
 		    {
 			if (0 == strcmp(table, sbuffer))
 			{
@@ -699,15 +700,15 @@ void nl_debug(void *msg, int len)
 		{
 		    if (RTM_NEWROUTE == rh->nlmsg_type)
 		    {
-			c = "request new route/route info (24)";
+			c = (unsigned char *)"request new route/route info (24)";
 		    }
 		    else if (RTM_DELROUTE == rh->nlmsg_type)
 		    {
-			c = "delete route (25)";
+			c = (unsigned char *)"delete route (25)";
 		    }
 		    else /* RTM_GETROUTE */
 		    {
-			c = "get route (26)";
+			c = (unsigned char *)"get route (26)";
 		    }
 
 		    fprintf(stderr, "NLMSG: %s\n", c);
@@ -818,13 +819,13 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     if ((nlsd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE)) < 0)
     {
 	if (debug) fprintf(stderr, "Can not open netlink socket.\n");
-	return;
+	return 0;
     }
 
     if (bind(nlsd, (struct sockaddr *)&sa, sizeof(sa)) < 0)
     {
         if (debug) fprintf(stderr, "Can not bind to netlink socket.\n");
-	return;
+	return 0;
     }
 
     if (debug && verbose) fprintf(stderr, "NL sending request.\n");
@@ -835,33 +836,30 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
 	if (debug) fprintf(stderr, "Can not talk to rtnetlink.\n");
     }
 
-    if (len = recv(nlsd, nlrxbuf, sizeof(nlrxbuf), MSG_DONTWAIT|MSG_PEEK))
+    if ((len = recv(nlsd, nlrxbuf, sizeof(nlrxbuf), MSG_DONTWAIT|MSG_PEEK)) > 0)
     {
-        if (len > 0)
-	{
-	    if (debug && verbose) fprintf(stderr, "NL response received.\n");
-	    nl_debug(nlrxbuf, len);
+	if (debug && verbose) fprintf(stderr, "NL response received.\n");
+	nl_debug(nlrxbuf, len);
 
-	    if (ROUTE_GET == action)
+	if (ROUTE_GET == action)
+	{
+	    /* parse response for ROUTE_GET */
+	    for (rh = (struct nlmsghdr *)nlrxbuf; NLMSG_OK(rh, len); rh = NLMSG_NEXT(rh, len))
 	    {
-		/* parse response for ROUTE_GET */
-		for (rh = (struct nlmsghdr *)nlrxbuf; NLMSG_OK(rh, len); rh = NLMSG_NEXT(rh, len))
+		if (rh->nlmsg_type == 24) /* route info resp */
 		{
-		    if (rh->nlmsg_type == 24) /* route info resp */
+		    rm = NLMSG_DATA(rh);
+		    for (rtattr = (struct rtattr *)RTM_RTA(rm); RTA_OK(rtattr, len); rtattr = RTA_NEXT(rtattr, len))
 		    {
-			rm = NLMSG_DATA(rh);
-			for (rtattr = (struct rtattr *)RTM_RTA(rm); RTA_OK(rtattr, len); rtattr = RTA_NEXT(rtattr, len))
+			if (RTA_GATEWAY == rtattr->rta_type)
 			{
-			    if (RTA_GATEWAY == rtattr->rta_type)
-			    {
-				result = *((uint32_t *)RTA_DATA(rtattr));
-			    }
+			    result = *((uint32_t *)RTA_DATA(rtattr));
 			}
 		    }
-		    else if (NLMSG_ERROR == rh->nlmsg_type)
-		    {
-			result = 0;
-		    }
+		}
+		else if (NLMSG_ERROR == rh->nlmsg_type)
+		{
+		    result = 0;
 		}
 	    }
 	}
@@ -872,8 +870,6 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
 
 void route_update(uint32_t address, uint32_t netmask, uint32_t nexthop)
 {
-	uint32_t res;
-	
 	if (route_func(ROUTE_GET, address, netmask, 0) != nexthop)
 	{
 	    route_func(ROUTE_DEL, address, netmask, 0); /* fails if route does not exist - no problem */
@@ -936,7 +932,7 @@ int process_auth(char *buf, int len, int needed)
 			return -1;
 		}
 
-		if (strncmp(auth->pass, passwd, 16) != 0)
+		if (strncmp((char *)auth->pass, passwd, 16) != 0)
 		{
 			if (debug) fprintf(stderr, "Invalid password.\n");
 			return -1;
@@ -1035,9 +1031,6 @@ void process_entry(char *buf)
 int process_message(char *buf, int len)
 {
 	rip_header *hdr;
-
-	char *ibuf = buf;
-	int ilen = len;
 
 	if (len < RIP_HDR_LEN + RIP_ENTRY_LEN)
 	{
@@ -1179,8 +1172,6 @@ static void on_alarm(int sig)
 
 static void on_hup(int sig)
 {
-	int i;
-
 	if (debug) fprintf(stderr, "SIGHUP received!\n");
 	
 	route_delete_all();
@@ -1197,9 +1188,6 @@ int main(int argc, char **argv)
 	char databuf[BUFFERSIZE];
 	char *pload;
 	int len, plen;
-
-	struct iphdr *iph;
-	struct udphdr *udph;
 
 	while ((p = getopt(argc, argv, "dvsrh?i:a:p:t:f:e:")) != -1)
 	{

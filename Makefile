@@ -11,7 +11,7 @@ OWN = daemon
 GRP = daemon
 
 CC = gcc
-COPT = -O2
+COPT = -Wall -O2
 LOPT =
 
 ampr-ripd:	ampr-ripd.c
