@@ -53,8 +53,7 @@
  *    1.3      7.Aug.2013      Minor bug fix, removed compiler warnings
  *    1.4      8.Aug,2013      Possible buffer overflow fixed
  *                             Reject metrics 15 packets fixed
- *    1.5     10.Aug.2013      Corrected a stupid netmask calculation error introduced in v1.4
- *    1.6     10.Oct.2013      Changed multicast setup procedures to be interface specific (Tnx. Rob, PE1CHL)
+
 
  INSTALLATION
  ------------

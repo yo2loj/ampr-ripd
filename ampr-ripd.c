@@ -1,5 +1,5 @@
 /*
- * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.6
+ * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.0
  *
  * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
  *
@@ -54,7 +54,6 @@
  *    1.4     8.Aug.2013    Possible buffer overflow fixed
  *                          Reject metric 15 packets fixed
  *    1.5    10.Aug.2013    Corrected a stupid netmask calculation error introduced in v1.4
- *    1.6    10.Oct.2013    Changed multicast setup procedures to be interface specific (Tnx. Rob, PE1CHL)
  */
 
 #include <stdlib.h>
@@ -1187,7 +1186,7 @@ int main(int argc, char **argv)
 	int p;
 
 	struct sockaddr_in sin;
-	struct group_req group;
+	struct ip_mreq group;
 	
 	char databuf[BUFFERSIZE];
 	char *pload;
@@ -1323,13 +1322,10 @@ int main(int argc, char **argv)
 
 	    /* join multicast group 224.0.0.9 */
 	    memset((char *)&group, 0, sizeof(group));
-	    memset((char *)&sin, 0, sizeof(sin));
-	    sin.sin_family = AF_INET;
-	    sin.sin_addr.s_addr = inet_addr("224.0.0.9");
-	    memcpy(&group.gr_group, &sin, sizeof(sin));
-	    group.gr_interface = tunidx;
+	    group.imr_multiaddr.s_addr = inet_addr("224.0.0.9");
+	    group.imr_interface.s_addr = tunaddr;
 
-	    if (setsockopt(tunsd, IPPROTO_IP, MCAST_JOIN_GROUP, (char *)&group, sizeof(group)) < 0)
+	    if (setsockopt(tunsd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *)&group, sizeof(group)) < 0)
 	    {
 		PERROR("Tunnel socket: join multicast");
 		close(tunsd);
