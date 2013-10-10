@@ -1,12 +1,14 @@
 /*
  * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.0
  *
- * Copyright (C) 2013 Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>.
- *
- * Compile with: gcc -Wall -O6 -o ampr-ripd ampr-ripd.c
+ * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
  *
  *
- * Usage: ampr-ripd [-?|-h] [-d] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-f <interface>] [-e <ip>]
+ *
+ * Compile with: gcc -O2 -o ampr-ripd ampr-ripd.c
+ *
+ *
+ * Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-f <interface>] [-e <ip>]
  *
  * Options:
  *          -?, -h                usage info
@@ -15,6 +17,7 @@
  *          -s                    save routes to /var/lib/ampr-ripd/encap.txt (encap format),
  *                                if this file exists, it will be loaded on startup regardless
  *                                of this option
+ *          -r                    use raw socket instead of multicast
  *          -i <interface>        tunnel interface to use, defaults to 'tunl0'
  *          -t <table>            routing table to use, defaults to 'main'
  *          -a  <ip>[,<ip>...]    comma separated list of IPs to be ignored
@@ -46,6 +49,7 @@
  *    0.9    14.Apr.2013    Alpha release, based on Hessus's rip44d
  *    1.0     1.Aug.2013    First functional version, no tables, no tcp window setting
  *    1.1     1.Aug.2013    Fully functional version
+ *    1.2     3.Aug.2013    Added option for using raw sockets instead of multicast
  */
 
 #include <stdlib.h>
@@ -153,12 +157,13 @@ typedef struct
 } route_entry;
 
 
-static char *usage_string = "Usage: ampr-ripd [-d] [-v] [-s] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-t <table>] [-f <interface>] [-e <ip>]\n";
+static char *usage_string = "Usage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-t <table>] [-f <interface>] [-e <ip>]\n";
 
 
 int debug = FALSE;
 int verbose = FALSE;
 int save = FALSE;
+int raw = FALSE;
 char *tunif = "tunl0";
 char tunidx = 0;
 unsigned int tunaddr;
@@ -1191,12 +1196,12 @@ int main(int argc, char **argv)
 	
 	char databuf[BUFFERSIZE];
 	char *pload;
-	int len;
+	int len, plen;
 
 	struct iphdr *iph;
 	struct udphdr *udph;
 
-	while ((p = getopt(argc, argv, "dvsh?i:a:p:t:f:e:")) != -1)
+	while ((p = getopt(argc, argv, "dvsrh?i:a:p:t:f:e:")) != -1)
 	{
 		switch (p)
 		{
@@ -1208,6 +1213,9 @@ int main(int argc, char **argv)
 			break;
 		case 's':
 			save = TRUE;
+			break;
+		case 'r':
+			raw = TRUE;
 			break;
 		case 'i':
 			tunif = optarg;
@@ -1256,66 +1264,82 @@ int main(int argc, char **argv)
 
 	route_set_all();
 
-	/* create multicast listen socket on tunnel */
-
-	if (debug) fprintf(stderr, "Creating RIP UDP listening socket.\n");
-
-	if ((tunsd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0)
+	if (TRUE == raw)
 	{
+	    /* create multicast listen socket on tunnel */
+
+	    if (debug) fprintf(stderr, "Creating RIP UDP listening socket.\n");
+
+	    if ((tunsd = socket(PF_INET, SOCK_RAW, 4)) < 0)
+	    {
+		PERROR("Raw socket");
+		return 1;
+	    }
+	}
+	else
+	{
+	
+	    /* create multicast listen socket on tunnel */
+
+	    if (debug) fprintf(stderr, "Creating RIP UDP listening socket.\n");
+
+	    if ((tunsd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0)
+	    {
 		PERROR("Tunnel socket");
 		return 1;
-	}
+	    }
 
-	if (debug && verbose) fprintf(stderr, "Setting up multicast interface.\n");
+	    if (debug && verbose) fprintf(stderr, "Setting up multicast interface.\n");
 
-	int reuse = 1;
-	if (setsockopt(tunsd, SOL_SOCKET, SO_REUSEADDR, (char *)&reuse, sizeof(reuse)) < 0)
-	{
+	    int reuse = 1;
+	    if (setsockopt(tunsd, SOL_SOCKET, SO_REUSEADDR, (char *)&reuse, sizeof(reuse)) < 0)
+	    {
 		PERROR("Tunnel socket: Setting SO_REUSEADDR");
 		close(tunsd);
 		return 1;
-	}
+	    }
 
-	if (setsockopt(tunsd, SOL_SOCKET, SO_BINDTODEVICE, tunif, strlen(tunif)) < 0)
-	{
+	    if (setsockopt(tunsd, SOL_SOCKET, SO_BINDTODEVICE, tunif, strlen(tunif)) < 0)
+	    {
 		PERROR("Tunnel socket: Setting SO_BINDTODEVICE");
 		close(tunsd);
 		return 1;
-	}
+	    }
 
-	set_multicast(tunsd, tunif);
+	    set_multicast(tunsd, tunif);
 
-	memset((char *)&sin, 0, sizeof(sin));
-	sin.sin_family = PF_INET;
-	sin.sin_addr.s_addr = INADDR_ANY; /* mandatory INADDR_ANY for multicast */
-	sin.sin_port = htons(IPPORT_ROUTESERVER);
+	    memset((char *)&sin, 0, sizeof(sin));
+	    sin.sin_family = PF_INET;
+	    sin.sin_addr.s_addr = INADDR_ANY; /* mandatory INADDR_ANY for multicast */
+	    sin.sin_port = htons(IPPORT_ROUTESERVER);
 
-	if (bind(tunsd, (struct sockaddr *)&sin, sizeof(sin)))
-	{
+	    if (bind(tunsd, (struct sockaddr *)&sin, sizeof(sin)))
+	    {
 		PERROR("Tunnel socket: Bind");
 		close(tunsd);
 		return 1;
-	}
+	    }
 
-	/* disable loopback */
-	int loop = 0;
-	if (setsockopt(tunsd, IPPROTO_IP, IP_MULTICAST_LOOP, (char *)&loop, sizeof(loop)) < 0)
-	{
+	    /* disable loopback */
+	    int loop = 0;
+	    if (setsockopt(tunsd, IPPROTO_IP, IP_MULTICAST_LOOP, (char *)&loop, sizeof(loop)) < 0)
+	    {
 		PERROR("Tunnel socket: Disable loopback");
 		close(tunsd);
 		return 1;
-	}
+	    }
 
-	/* join multicast group 224.0.0.9 */
-	memset((char *)&group, 0, sizeof(group));
-	group.imr_multiaddr.s_addr = inet_addr("224.0.0.9");
-	group.imr_interface.s_addr = tunaddr;
+	    /* join multicast group 224.0.0.9 */
+	    memset((char *)&group, 0, sizeof(group));
+	    group.imr_multiaddr.s_addr = inet_addr("224.0.0.9");
+	    group.imr_interface.s_addr = tunaddr;
 
-	if (setsockopt(tunsd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *)&group, sizeof(group)) < 0)
-	{
+	    if (setsockopt(tunsd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *)&group, sizeof(group)) < 0)
+	    {
 		PERROR("Tunnel socket: join multicast");
 		close(tunsd);
 		return 1;
+	    }
 	}
 
 	if (NULL != fwif)
@@ -1395,11 +1419,42 @@ int main(int argc, char **argv)
 		}
 		else
 		{
-			process_message(databuf, len);
+			if (TRUE == raw)
+			{
+			    if (len >= 48 + (RIP_HDR_LEN + RIP_ENTRY_LEN))
+			    {
+				struct iphdr *iph = (struct iphdr *)(databuf + 20);
+				struct udphdr *udh = (struct udphdr *)(databuf + 40);
+			
+				if ((iph->daddr == inet_addr("224.0.0.9")) &&
+				    (iph->saddr == inet_addr("44.0.0.1")) &&
+				    (udh->dest == htons(IPPORT_ROUTESERVER)) &&
+				    (udh->source == htons(IPPORT_ROUTESERVER)))
+				{
+				    pload = &databuf[48];
+				    plen = len - 48;
+				}
+				else
+				{
+				    continue;
+				}
+			    }
+			    else
+			    {
+				continue;
+			    }
+			}
+			else
+			{
+			    pload = databuf;
+			    plen = len;
+			}
+			
+			process_message(pload, plen);
 			
 			if (NULL != fwif)
 			{
-			    sendto(fwsd, databuf, len, 0, (struct sockaddr *)&sin, sizeof(sin));
+			    sendto(fwsd, pload, plen, 0, (struct sockaddr *)&sin, sizeof(sin));
 			}
 		}
 	}
