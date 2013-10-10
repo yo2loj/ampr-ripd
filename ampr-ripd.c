@@ -15,7 +15,8 @@
  *          -s                    save routes to /var/lib/ampr-ripd/encap.txt (encap format),
  *                                if this file exists, it will be loaded on startup regardless
  *                                of this option
- *          -i <interface>        tunnel interface to use, defaults to tunl0
+ *          -i <interface>        tunnel interface to use, defaults to 'tunl0'
+ *          -t <table>            routing table to use, defaults to 'main'
  *          -a  <ip>[,<ip>...]    comma separated list of IPs to be ignored
  *                                list contains local interface IPs by default
  *          -p <password>         RIPv2 password, defaults to none
@@ -42,8 +43,9 @@
  *
  * Version History
  * ---------------
- * 	0.9	14.Apr.2013	alpha release, based on Hessus's rip44d
- *
+ *    0.9    14.Apr.2013    Alpha release, based on Hessus's rip44d
+ *    1.0     1.Aug.2013    First functional version, no tables, no tcp window setting
+ *    1.1     1.Aug.2013    Fully functional version
  */
 
 #include <stdlib.h>
@@ -62,9 +64,12 @@
 #include <linux/rtnetlink.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <ctype.h>
 
 
 #define RTSIZE		1000	/* maximum number of route entries */
@@ -72,7 +77,9 @@
 
 #define RTFILE		"/var/lib/ampr-ripd/encap.txt"	/* encap file */
 
-#define	BUFFERSIZE	4096
+#define RTAB_FILE	"/etc/iproute2/rt_tables"	/* route tables */
+
+#define	BUFFERSIZE	8192
 #define MYIPSIZE	25	/* max number of local interface IPs */
 
 #define FALSE	0
@@ -88,16 +95,11 @@
 
 #define RTPROT_AMPR		44
 
-#define rip_pcmd(cmd)		((cmd==1)?("Request"):((cmd==2)?("Response"):("Unknown")))
-
-#define NLMSG_TAIL(nmsg)	((struct rtattr *) (((void *) (nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
-
-typedef enum
-{
-    ROUTE_ADD,
-    ROUTE_DEL,
-    ROUTE_GET
-} rt_actions;
+#define PERROR(s)				fprintf(stderr, "%s: %s\n", (s), strerror(errno))
+#define rip_pcmd(cmd)				((cmd==1)?("Request"):((cmd==2)?("Response"):("Unknown")))
+#define NLMSG_TAIL(nmsg)			((struct rtattr *) (((void *) (nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
+#define addattr32(n, maxlen, type, data) 	addattr_len(n, maxlen, type, &data, 4)
+#define rta_addattr32(rta, maxlen, type, data)	rta_addattr_len(rta, maxlen, type, &data, 4)
 
 /* uncomment if types not available */
 /*
@@ -109,6 +111,13 @@ typedef signed short		sint16_t;
 typedef signed int		sint32_t;
 
 */
+
+typedef enum
+{
+    ROUTE_ADD,
+    ROUTE_DEL,
+    ROUTE_GET
+} rt_actions;
 
 typedef struct __attribute__ ((__packed__))
 {
@@ -135,7 +144,7 @@ typedef struct __attribute__ ((__packed__))
     uint8_t pass[16];
 } rip_auth;
 
-typedef struct s_route_entry
+typedef struct
 {
     uint32_t address;
     uint32_t netmask;
@@ -156,19 +165,19 @@ unsigned int tunaddr;
 char *ilist = NULL;
 char *passwd = NULL;
 char *table = NULL;
+int nrtable;
 char *fwif = NULL;
 char *fwdest = "224.0.0.9";
 
 int tunsd;
 int fwsd;
-
+int seq;
 int updated = FALSE;
 
 route_entry routes[RTSIZE];
 
 uint32_t myips[25];
 
-#define PERROR(s)	fprintf(stderr, "%s: %s\n", (s), strerror(errno))
 
 uint32_t getip(const char *dev)
 {
@@ -189,20 +198,18 @@ uint32_t getip(const char *dev)
 void set_multicast(int sockfd, const char *dev)
 {
     struct ifreq ifr;
-    int res;
 
     memset(&ifr, 0, sizeof(struct ifreq));
     strcpy(ifr.ifr_name, dev);
 
-    res = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
-    if (res < 0)
+    if (ioctl(sockfd, SIOCGIFFLAGS, &ifr)< 0)
     {
 	return;
     }
 
     ifr.ifr_flags |= IFF_MULTICAST;
 
-    res = ioctl(sockfd, SIOCSIFFLAGS, &ifr);
+    ioctl(sockfd, SIOCSIFFLAGS, &ifr);
 
     return;
 }
@@ -237,6 +244,85 @@ char *ipv4_ntoa_encap(int idx)
 	}
     }
     return buf;
+}
+
+void set_rt_table(char *arg)
+{
+    FILE *rtf;
+    char buffer[255];
+    char sbuffer[255];
+    char *p;
+    int i;
+
+    if (NULL == arg)
+    {
+	nrtable =  RT_TABLE_MAIN;
+	if (debug) fprintf(stderr, "Using routing table 'main' (%d).\n", nrtable);
+    }
+    else if (strcmp("default", arg) == 0)
+    {
+	nrtable =  RT_TABLE_DEFAULT;
+	if (debug) fprintf(stderr, "Using routing table 'default' (%d).\n", nrtable);
+    }
+    else if (strcmp("main", arg) == 0)
+    {
+	nrtable =  RT_TABLE_MAIN;
+	if (debug) fprintf(stderr, "Using routing table 'main' (%d).\n", nrtable);
+    }
+    else if (strcmp("local", arg) == 0)
+    {
+	nrtable =  RT_TABLE_LOCAL;
+	if (debug) fprintf(stderr, "Using routing table 'local' (%d).\n", nrtable);
+    }
+    else
+    {
+	/* check for a number */
+	for (i=0; i<strlen(arg); i++)
+	{
+	    if (!isdigit(arg[i]))
+		break;
+	}
+
+	if (i==strlen(arg)) /* we are all digits */
+	{
+	    if (1 != sscanf(arg, "%d", &nrtable))
+	    {
+		/* fallback */
+		nrtable = RT_TABLE_MAIN;
+		if (debug) fprintf(stderr, "Can not find routing table '%s'. Assuming table 'main' (%d)", table, nrtable);
+	    }
+	    if (debug) fprintf(stderr, "Using routing table (%d).\n", nrtable);
+	}
+	else /* we have a table name  */
+	{
+	    rtf = fopen(RTAB_FILE, "r");
+	    if (NULL == rtf)
+	    {
+		if (debug) fprintf(stderr, "Can not open routing table file '%s'. Assuming table main (254)\n", RTAB_FILE);
+		nrtable = RT_TABLE_MAIN;
+	    }
+
+	    while (fgets(buffer, 255, rtf) != NULL)
+	    {
+		if ((buffer[0]!='#') && (p = strstr(buffer, table)) != NULL)
+		{
+		    if (2 == sscanf(buffer, "%d %s", &nrtable, &sbuffer))
+		    {
+			if (0 == strcmp(table, sbuffer))
+			{
+			    if (debug) fprintf(stderr, "Using routing table '%s' (%d).\n", table, nrtable);
+			    return;
+			}
+		    }
+		}
+		p = NULL;
+		continue;
+	    }
+	    nrtable = RT_TABLE_MAIN;
+	    if (debug) fprintf(stderr, "Can not find routing table %s. Assuming table 'main' (%d)", table, nrtable);
+	    fclose (rtf);
+	}
+    }
 }
 
 void detect_myips(void)
@@ -533,9 +619,9 @@ void load_encap(void)
 	fclose(efd);
 }
 
-int addattr(struct nlmsghdr *n, int maxlen, int type, uint32_t data)
+int addattr_len(struct nlmsghdr *n, int maxlen, int type, const void *data, int alen)
 {
-    int len = RTA_LENGTH(4);
+    int len = RTA_LENGTH(alen);
     struct rtattr *rta;
 
     if ((NLMSG_ALIGN(n->nlmsg_len) + len) > maxlen)
@@ -546,12 +632,29 @@ int addattr(struct nlmsghdr *n, int maxlen, int type, uint32_t data)
     rta = NLMSG_TAIL(n);
     rta->rta_type = type;
     rta->rta_len = len;
-    memcpy(RTA_DATA(rta), &data, 4);
+    memcpy(RTA_DATA(rta), data, len);
     n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + len;
     return 0;
 }
 
-int seq;
+int rta_addattr_len(struct rtattr *rta, int maxlen, int type, const void *data, int alen)
+{
+    struct rtattr *subrta;
+    int len = RTA_LENGTH(alen);
+    if ((RTA_ALIGN(rta->rta_len) + RTA_ALIGN(len)) > maxlen)
+    {
+	if (debug) fprintf(stderr, "Max allowed length exceeded during sub-RTA assembly.\n");
+	return -1;
+    }
+
+    subrta = (struct rtattr *)(((void *)rta) + RTA_ALIGN(rta->rta_len));
+    subrta->rta_type = type;
+    subrta->rta_len = len;
+    memcpy(RTA_DATA(subrta), data, alen);
+    rta->rta_len = NLMSG_ALIGN(rta->rta_len) + RTA_ALIGN(len);
+    return 0;
+}
+
 
 void nl_debug(void *msg, int len)
 {
@@ -628,6 +731,7 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     int len;
 
     char nlrxbuf[4096];
+    char mxbuf[256];
 
     struct {
 	struct nlmsghdr hdr;
@@ -635,12 +739,18 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
 	char buf[1024];
     } req;
 
+    struct rtattr *mxrta = (void *)mxbuf;
+
     struct sockaddr_nl sa;
     struct rtattr *rtattr;
     struct nlmsghdr *rh;
     struct rtmsg *rm;
 
     uint32_t result = 0;
+    uint32_t window = 840;
+
+    mxrta->rta_type = RTA_METRICS;
+    mxrta->rta_len = RTA_LENGTH(0);
 
     memset(&req, 0, sizeof(req));
 
@@ -655,7 +765,15 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     req.hdr.nlmsg_pid = getpid();
     req.rtm.rtm_family = AF_INET;
     req.rtm.rtm_dst_len = netmask;
-    req.rtm.rtm_table = RT_TABLE_MAIN;
+
+    if (NULL == table)
+    {
+        req.rtm.rtm_table = RT_TABLE_MAIN;
+    }
+    else
+    {
+        req.rtm.rtm_table = nrtable;
+    }
 
     if (ROUTE_DEL == action)
     {
@@ -670,7 +788,7 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     {
 	req.rtm.rtm_flags |= RTNH_F_ONLINK;
 	req.rtm.rtm_protocol = RTPROT_AMPR;
-	req.rtm.rtm_scope = RT_SCOPE_UNIVERSE;
+	
 	req.rtm.rtm_type = RTN_UNICAST;
 	req.hdr.nlmsg_type = RTM_NEWROUTE;
 	req.hdr.nlmsg_flags |= NLM_F_CREATE;
@@ -679,13 +797,17 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     else
     {
 	req.hdr.nlmsg_type = RTM_GETROUTE;
+	req.rtm.rtm_scope = RT_SCOPE_UNIVERSE;
     }
 
-    addattr(&req.hdr, sizeof(req), RTA_DST, address);
+    addattr32(&req.hdr, sizeof(req), RTA_DST, address);
+
     if (ROUTE_ADD == action)
     {
-	if (0 != nexthop) addattr(&req.hdr, sizeof(req), RTA_GATEWAY, nexthop); /* gateway */
-	addattr(&req.hdr, sizeof(req), RTA_OIF, tunidx); /* dev */
+	if (0 != nexthop) addattr32(&req.hdr, sizeof(req), RTA_GATEWAY, nexthop); /* gateway */
+	addattr32(&req.hdr, sizeof(req), RTA_OIF, tunidx); /* dev */
+	rta_addattr32(mxrta, sizeof(mxbuf), RTAX_WINDOW, window);
+	addattr_len(&req.hdr, sizeof(req), RTA_METRICS, RTA_DATA(mxrta), RTA_PAYLOAD(mxrta));
     }
 
     if ((nlsd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE)) < 0)
@@ -1066,6 +1188,13 @@ int main(int argc, char **argv)
 
 	struct sockaddr_in sin;
 	struct ip_mreq group;
+	
+	char databuf[BUFFERSIZE];
+	char *pload;
+	int len;
+
+	struct iphdr *iph;
+	struct udphdr *udph;
 
 	while ((p = getopt(argc, argv, "dvsh?i:a:p:t:f:e:")) != -1)
 	{
@@ -1105,6 +1234,8 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	}
+
+	set_rt_table(table);
 
 	list_clear();
 	load_encap();
@@ -1199,8 +1330,6 @@ int main(int argc, char **argv)
 			return 1;
 		}
 
-		set_multicast(fwsd, fwif);
-
 		if (setsockopt(fwsd, SOL_SOCKET, SO_BINDTODEVICE, fwif, strlen(fwif)) < 0)
 		{
 			PERROR("Tunnel socket: Setting SO_BINDTODEVICE");
@@ -1211,7 +1340,7 @@ int main(int argc, char **argv)
 
 		memset((char *)&sin, 0, sizeof(sin));
 		sin.sin_family = PF_INET;
-		sin.sin_addr.s_addr = INADDR_ANY; /* mandatory INADDR_ANY for multicast */
+		sin.sin_addr.s_addr = INADDR_ANY;
 		sin.sin_port = htons(IPPORT_ROUTESERVER);
 		
 		if (bind(fwsd, (struct sockaddr *)&sin, sizeof(sin)))
@@ -1257,8 +1386,6 @@ int main(int argc, char **argv)
 
 	if (debug) fprintf(stderr, "Waiting for RIPv2 broadcasts...\n");
 
-	char databuf[BUFFERSIZE];
-	int len;
 
 	while (1)
 	{
@@ -1269,6 +1396,7 @@ int main(int argc, char **argv)
 		else
 		{
 			process_message(databuf, len);
+			
 			if (NULL != fwif)
 			{
 			    sendto(fwsd, databuf, len, 0, (struct sockaddr *)&sin, sizeof(sin));

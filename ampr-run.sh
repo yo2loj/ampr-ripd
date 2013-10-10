@@ -11,7 +11,5 @@
 #    replace with your own IP if you need this or just delete the parameter)
 # - all received RIPv2 multicasts are forwarded to interface eth0 as multicasts (drop this if not needed)...
 #
-# IF YOUR SYSTEM DOES NOT SUPPORT MULTICAST, ADD THE '-r' OPTION
-#
 
 /usr/sbin/ampr-ripd -s -i ampr0 -p the_password -a 193.0.0.1 -f eth0
