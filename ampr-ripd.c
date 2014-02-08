@@ -1,5 +1,5 @@
 /*
- * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.6
+ * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.7
  *
  * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
  *
@@ -8,7 +8,7 @@
  * Compile with: gcc -O2 -o ampr-ripd ampr-ripd.c
  *
  *
- * Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-f <interface>] [-e <ip>]
+ * Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-f <interface>] [-e <ip>]
  *
  * Options:
  *          -?, -h                usage info
@@ -20,7 +20,8 @@
  *          -r                    use raw socket instead of multicast
  *          -i <interface>        tunnel interface to use, defaults to 'tunl0'
  *          -t <table>            routing table to use, defaults to 'main'
- *          -a  <ip>[,<ip>...]    comma separated list of IPs to be ignored
+ *          -a  <ip>[,<ip>...]    comma separated list of IPs/hostnames or encap style entries to be ignored
+ *                                (max. 10 hostnames or IPs, unlimited encap entries)
  *                                list contains local interface IPs by default
  *          -p <password>         RIPv2 password, defaults to none
  *          -f <interface>        interface for RIP forwarding, defaults to none/disabled
@@ -55,6 +56,7 @@
  *                          Reject metric 15 packets fixed
  *    1.5    10.Aug.2013    Corrected a stupid netmask calculation error introduced in v1.4
  *    1.6    10.Oct.2013    Changed multicast setup procedures to be interface specific (Tnx. Rob, PE1CHL)
+ *    1.7     8.Feb.2014    Added support for dynamic hostnames and ampr subnets in the ignore list
  */
 
 #include <stdlib.h>
@@ -80,6 +82,8 @@
 #include <time.h>
 #include <ctype.h>
 
+#define AMPR_RIPD_VERSION	"1.7"
+
 //#define NL_DEBUG
 
 #define RTSIZE		1000	/* maximum number of route entries */
@@ -91,6 +95,7 @@
 
 #define	BUFFERSIZE	8192
 #define MYIPSIZE	25	/* max number of local interface IPs */
+#define MAXIGNORE	10	/* max number of hosts in the ignore list */
 
 #define FALSE	0
 #define TRUE	!FALSE
@@ -163,7 +168,7 @@ typedef struct
 } route_entry;
 
 
-static char *usage_string = "\nAMPR RIPv2 daemon v1.6 by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip>[,<ip>...]] [-p <password>] [-t <table>] [-f <interface>] [-e <ip>]\n";
+static char *usage_string = "\nAMPR RIPv2 daemon " AMPR_RIPD_VERSION "by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-t <table>] [-f <interface>] [-e <ip>]\n";
 
 
 int debug = FALSE;
@@ -174,6 +179,8 @@ char *tunif = "tunl0";
 unsigned int tunidx = 0;
 unsigned int tunaddr;
 char *ilist = NULL;
+uint32_t ignore_ip[MAXIGNORE];
+
 char *passwd = NULL;
 char *table = NULL;
 int nrtable;
@@ -184,11 +191,134 @@ int tunsd;
 int fwsd;
 int seq;
 int updated = FALSE;
+int dns_ignore_lookup = FALSE;
+int encap_ignore = FALSE;
 
 route_entry routes[RTSIZE];
 
 uint32_t myips[MYIPSIZE];
 
+
+char *ipv4_htoa(unsigned int ip)
+{
+    static char buf[INET_ADDRSTRLEN];
+    sprintf(buf, "%d.%d.%d.%d", (ip & 0xff000000) >> 24, (ip & 0x00ff0000) >> 16, (ip & 0x0000ff00) >> 8, ip & 0x000000ff);
+    return buf;
+}
+
+char *ipv4_ntoa(unsigned int ip)
+{
+    unsigned int lip = ntohl(ip);
+    return ipv4_htoa(lip);
+}
+
+int32_t ns_resolv(const char *name)
+{
+    struct hostent *host;
+
+    host = gethostbyname(name);
+
+    if (host == NULL)
+    {
+	return 0;
+    }
+
+    if (host->h_addrtype != AF_INET)
+    {
+	return 0;
+    }
+
+    return ((struct in_addr) *((struct in_addr *) host->h_addr_list[0])).s_addr;
+}
+
+void ilist_resolve(void)
+{
+    int i = 0;
+    int j;
+    char buf[255];
+    char *plist = ilist;
+    char *nlist;
+    uint32_t ip;
+
+
+    if (ilist == NULL)
+    {
+	return;
+    }
+
+    do
+    {
+	
+	strncpy(buf, plist, 254);
+
+        nlist = strstr(buf, ",");
+
+	if (nlist != NULL)
+	{
+	    *nlist = 0;
+	}
+
+	if (debug) fprintf(stderr, "Ignoring host: %s", buf);
+
+	ip = ns_resolv(buf);
+
+	if (ip != 0)
+	{
+	    for (j=0; j<i; j++)
+	    {
+		if (ignore_ip[j] == ip)
+		{
+		    /* already in list - clear */
+		    ip = 0;
+		}
+	    }
+	
+	    if (ip != 0)
+	    {
+		ignore_ip[i] = ip;
+		if (debug) fprintf(stderr, " address: %s\n", ipv4_ntoa(ip));
+		if (strcmp(plist, ipv4_ntoa(ip)) != 0)
+		{
+		    dns_ignore_lookup = TRUE;
+		}
+		i++;
+	    }
+	    else
+	    {
+		if (debug) fprintf(stderr, " - already in list\n");
+	    }
+	}
+	else
+	{
+	    if (strstr(buf, "44.") == buf)
+	    {
+		encap_ignore = TRUE;
+		if (debug) fprintf(stderr, " - ampr entry\n");
+	    }
+	    else
+	    {
+		if (debug) fprintf(stderr, " - invalid hostname\n");
+	    }
+	}
+
+	plist = strstr(plist, ",");
+	if (plist != NULL) plist++;
+
+    } while ((i<MAXIGNORE) && (plist != NULL));
+
+    if (debug) 
+    {
+	if (verbose) fprintf(stderr, "Total %d IPs in ignore lookup table.\n", i);
+	if (dns_ignore_lookup) fprintf(stderr, "Hostname usage found in ignore list - will do lookups after RIP update.\n");
+    }
+
+
+    while (i<MAXIGNORE)
+    {
+	ignore_ip[i] = 0;
+	i++;
+    }
+}
 
 uint32_t getip(const char *dev)
 {
@@ -225,24 +355,11 @@ void set_multicast(int sockfd, const char *dev)
     return;
 }
 
-char *ipv4_htoa(unsigned int ip)
-{
-    static char buf[INET_ADDRSTRLEN];
-    sprintf(buf, "%d.%d.%d.%d", (ip & 0xff000000) >> 24, (ip & 0x00ff0000) >> 16, (ip & 0x0000ff00) >> 8, ip & 0x000000ff);
-    return buf;
-}
 
-char *ipv4_ntoa(unsigned int ip)
-{
-    unsigned int lip = ntohl(ip);
-    return ipv4_htoa(lip);
-}
-
-char *ipv4_ntoa_encap(int idx)
+char *ipv4_ntoa_encap(uint32_t lip)
 {
     static char buf[INET_ADDRSTRLEN];
     char *p;
-    unsigned int lip = ntohl(routes[idx].address);
     sprintf(buf, "%d.%d", (lip & 0xff000000) >> 24, (lip & 0x00ff0000) >> 16);
     if ((((lip & 0x0000ff00) >> 8) != 0) || ((lip & 0x000000ff) != 0))
     {
@@ -254,6 +371,14 @@ char *ipv4_ntoa_encap(int idx)
 	    sprintf(p, ".%d", lip & 0x000000ff);
 	}
     }
+    return buf;
+}
+
+char *idx_encap(int idx)
+{
+    static char *buf;
+    uint32_t lip = ntohl(routes[idx].address);
+    buf=ipv4_ntoa_encap(lip);
     return buf;
 }
 
@@ -390,11 +515,8 @@ void detect_myips(void)
 
 int check_ignore(unsigned int ip)
 {
-	char *ipstr;
-	char *sptr;
-	char *ptr;
 	int i;
-
+	
 	/* check for a local interface match */
 	for (i=0; i<MYIPSIZE; i++)
 	{
@@ -402,27 +524,62 @@ int check_ignore(unsigned int ip)
 	    if (ip == myips[i]) return TRUE;
 	}
 
-	/* check for a match in the ignore list */
-	if (NULL != ilist)
+	/* check for a local interface match */
+	for (i=0; i<MAXIGNORE; i++)
 	{
-	    ipstr = ipv4_ntoa(ip);
-	    sptr = ilist;
-
-	    while ((ptr = strstr(sptr, ipstr)) != NULL)
-	    {
-		/* we have ip as substring in the list - have to check if it is the complete ip - has to have a comma or 0 after it */
-		if ((ptr[strlen(ipstr)] == ',')||(ptr[strlen(ipstr)] == 0))
-		{
-			/* ip is in ignore list */
-			return TRUE;
-		}
-		/* false alarm, continue search */
-		sptr = &ptr[strlen(ipstr)];
-	    }
+	    if (0 == ignore_ip[i]) break;
+	    if (ip == ignore_ip[i]) return TRUE;
 	}
-	/* the ip is valid */
+
+	/* valid IP */
 	return FALSE;
 };
+
+int check_ignore_encap(uint32_t ip, int mask)
+{
+    char *plist = ilist;
+    char *nlist;
+    char buf[255];
+    char encb[INET_ADDRSTRLEN + 3];
+    char nb[INET_ADDRSTRLEN + 3];
+
+    sprintf(encb, "%s/%d", ipv4_ntoa_encap(ntohl(ip)), mask);
+    sprintf(nb, "%s/%d", ipv4_ntoa(ip), mask);
+
+    if (ilist == NULL)
+    {
+	return FALSE;
+    }
+
+    do
+    {
+	strncpy(buf, plist, 254);
+
+        nlist = strstr(buf, ",");
+
+	if (nlist != NULL)
+	{
+	    *nlist = 0;
+	}
+
+	if (strcmp(buf, encb) == 0)
+	{
+	    return TRUE;
+	}
+
+	if (strcmp(buf, nb) == 0)
+	{
+	    return TRUE;
+	}
+
+	plist = strstr(plist, ",");
+	if (plist != NULL) plist++;
+
+    } while (plist != NULL);
+
+    /* valid subnet */
+    return FALSE;
+}
 
 void list_add(unsigned int address, unsigned int netmask, unsigned int nexthop)
 {
@@ -551,7 +708,7 @@ void save_encap(void)
 	{
 		if (0 != routes[i].timestamp)
 		{
-		    fprintf(efd, "route addprivate %s", ipv4_ntoa_encap(i));
+		    fprintf(efd, "route addprivate %s", idx_encap(i));
 		    fprintf(efd, "/%d encap ", routes[i].netmask);
 		    fprintf(efd, "%s\n", ipv4_ntoa(routes[i].nexthop));
 		}
@@ -940,7 +1097,7 @@ int process_auth(char *buf, int len, int needed)
 			return -1;
 		}
 
-		if (strncmp((char *)auth->pass, passwd, 16) != 0)
+		if (strcmp((char *)auth->pass, passwd) != 0)
 		{
 			if (debug) fprintf(stderr, "Invalid password.\n");
 			return -1;
@@ -1018,7 +1175,7 @@ void process_entry(char *buf)
 	}
 
 	/* check if in ignore list */
-	if (check_ignore(rip->nexthop))
+	if (check_ignore(rip->nexthop) || check_ignore_encap(rip->address, netmask))
 	{
 		if (debug && verbose) fprintf(stderr, " - in ignore list, rejected\n");
 		return;
@@ -1151,6 +1308,12 @@ static void on_alarm(int sig)
 		fprintf(stderr, "Checking for expired routes.\n");
 	}
 
+	/* recheck for dynamic ignore list entries if hostnames are in use */
+	if (dns_ignore_lookup)
+	{
+	    ilist_resolve();
+	}
+
 	/* check route timestamp and remove expired routes */
 	for(i=0; i<RTSIZE; i++)
 	{
@@ -1177,7 +1340,8 @@ static void on_alarm(int sig)
 static void on_hup(int sig)
 {
 	if (debug) fprintf(stderr, "SIGHUP received!\n");
-	
+
+	ilist_resolve();
 	route_delete_all();
 	list_clear();
 }
@@ -1235,6 +1399,13 @@ int main(int argc, char **argv)
 		}
 	}
 
+	if (debug && verbose)
+	{
+		if (NULL !=ilist) fprintf(stderr, "Ignore list: %s\n", ilist);
+	}
+
+	ilist_resolve();
+
 	set_rt_table(table);
 
 	list_clear();
@@ -1245,7 +1416,6 @@ int main(int argc, char **argv)
 	if (debug && verbose)
 	{
 		fprintf(stderr, "Max list size: %d entries\n", RTSIZE);
-		if (NULL !=ilist) fprintf(stderr, "Ignore list: %s\n", ilist);
 	}
 
 	tunaddr = getip(tunif);
