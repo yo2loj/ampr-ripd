@@ -1,5 +1,5 @@
 /*
- * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.7
+ * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.8
  *
  * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
  *
@@ -8,7 +8,7 @@
  * Compile with: gcc -O2 -o ampr-ripd ampr-ripd.c
  *
  *
- * Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-f <interface>] [-e <ip>]
+ * Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-f <interface>] [-e <ip>]
  *
  * Options:
  *          -?, -h                usage info
@@ -24,6 +24,7 @@
  *                                (max. 10 hostnames or IPs, unlimited encap entries)
  *                                list contains local interface IPs by default
  *          -p <password>         RIPv2 password, defaults to none
+ *          -m <metric>           Use given route metric to set routes, defaults to 0
  *          -f <interface>        interface for RIP forwarding, defaults to none/disabled
  *          -e <ip>               forward destination IP, defaults to 224.0.0.9 if enabled
  *
@@ -57,6 +58,7 @@
  *    1.5    10.Aug.2013    Corrected a stupid netmask calculation error introduced in v1.4
  *    1.6    10.Oct.2013    Changed multicast setup procedures to be interface specific (Tnx. Rob, PE1CHL)
  *    1.7     8.Feb.2014    Added support for dynamic hostnames and ampr subnets in the ignore list
+ *    1.8    11.Feb.2014    Added option for route metric setting
  */
 
 #include <stdlib.h>
@@ -82,7 +84,7 @@
 #include <time.h>
 #include <ctype.h>
 
-#define AMPR_RIPD_VERSION	"1.7"
+#define AMPR_RIPD_VERSION	"1.8"
 
 //#define NL_DEBUG
 
@@ -168,7 +170,7 @@ typedef struct
 } route_entry;
 
 
-static char *usage_string = "\nAMPR RIPv2 daemon " AMPR_RIPD_VERSION "by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-t <table>] [-f <interface>] [-e <ip>]\n";
+static char *usage_string = "\nAMPR RIPv2 daemon " AMPR_RIPD_VERSION "by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>]  [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-f <interface>] [-e <ip>]\n";
 
 
 int debug = FALSE;
@@ -184,6 +186,7 @@ uint32_t ignore_ip[MAXIGNORE];
 char *passwd = NULL;
 char *table = NULL;
 int nrtable;
+int rmetric = 0;
 char *fwif = NULL;
 char *fwdest = "224.0.0.9";
 
@@ -976,6 +979,10 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     {
 	if (0 != nexthop) addattr32(&req.hdr, sizeof(req), RTA_GATEWAY, nexthop); /* gateway */
 	addattr32(&req.hdr, sizeof(req), RTA_OIF, tunidx); /* dev */
+	if (rmetric>0)
+	{
+	    addattr32(&req.hdr, sizeof(req), RTA_PRIORITY, rmetric); /* metrics */
+	}
 	rta_addattr32(mxrta, sizeof(mxbuf), RTAX_WINDOW, window);
 	addattr_len(&req.hdr, sizeof(req), RTA_METRICS, RTA_DATA(mxrta), RTA_PAYLOAD(mxrta));
     }
@@ -1355,9 +1362,10 @@ int main(int argc, char **argv)
 	
 	char databuf[BUFFERSIZE];
 	char *pload;
+	char *metric = NULL;
 	int len, plen;
 
-	while ((p = getopt(argc, argv, "dvsrh?i:a:p:t:f:e:")) != -1)
+	while ((p = getopt(argc, argv, "dvsrh?i:a:p:t:m:f:e:")) != -1)
 	{
 		switch (p)
 		{
@@ -1385,6 +1393,13 @@ int main(int argc, char **argv)
 		case 't':
 			table = optarg;
 			break;
+		case 'm':
+			metric = optarg;
+			if (sscanf(metric, "%d", &rmetric)!=1)
+			{
+			    rmetric = 0;
+			}
+			break;
 		case 'f':
 			fwif = optarg;
 			break;
@@ -1401,6 +1416,7 @@ int main(int argc, char **argv)
 
 	if (debug && verbose)
 	{
+		fprintf(stderr, "Using metric %d for routes.\n", rmetric);
 		if (NULL !=ilist) fprintf(stderr, "Ignore list: %s\n", ilist);
 	}
 
