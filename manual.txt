@@ -26,6 +26,9 @@
                                 The List contains local interface IPs by default
           -m <metric>           Metric to be used when setting routes.
                                 This is a numerical value from 0 to 255. Defaults to 0.
+          -w <window>           Sets the TCP window size to a given value (defaults to 840).
+                                This is needed since IP over AX.25 connections have small TCP window size.
+                                A value of 0 diables setting the window size (not recommended, default value should be ok)
           -p <password>         RIPv2 password, defaults to none
           -f <interface>        Interface for RIP forwarding, defaults to none/disabled
           -e <ip>               Forward destination IP, defaults to 224.0.0.9 if enabled
@@ -62,6 +65,7 @@
  *    1.6     10.Oct.2013      Changed multicast setup procedures to be interface specific (Tnx. Rob, PE1CHL)
  *    1.7      8.Feb.2014      Added support for dynamic hostnames and ampr subnets in the exclude list
  *    1.8     11.Feb.2014      Added option for route metric setting
+ *    1.9     13.Feb.2014      Added window size setting option and console detaching on daemon startup
 
  INSTALLATION
  ------------

@@ -1,5 +1,5 @@
 /*
- * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.8
+ * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.9
  *
  * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
  *
@@ -8,7 +8,7 @@
  * Compile with: gcc -O2 -o ampr-ripd ampr-ripd.c
  *
  *
- * Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-f <interface>] [-e <ip>]
+ * Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-w <window>] [-f <interface>] [-e <ip>]
  *
  * Options:
  *          -?, -h                usage info
@@ -25,6 +25,8 @@
  *                                list contains local interface IPs by default
  *          -p <password>         RIPv2 password, defaults to none
  *          -m <metric>           Use given route metric to set routes, defaults to 0
+ *          -w <window>           Sets TCP window size to the given value
+ *                                A value of 0 skips window setting. Defaults to 840
  *          -f <interface>        interface for RIP forwarding, defaults to none/disabled
  *          -e <ip>               forward destination IP, defaults to 224.0.0.9 if enabled
  *
@@ -59,6 +61,7 @@
  *    1.6    10.Oct.2013    Changed multicast setup procedures to be interface specific (Tnx. Rob, PE1CHL)
  *    1.7     8.Feb.2014    Added support for dynamic hostnames and ampr subnets in the ignore list
  *    1.8    11.Feb.2014    Added option for route metric setting
+ *    1.9    13.Feb.2014    Added window size setting option and console detaching on daemon startup
  */
 
 #include <stdlib.h>
@@ -72,6 +75,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <net/route.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
@@ -84,7 +88,7 @@
 #include <time.h>
 #include <ctype.h>
 
-#define AMPR_RIPD_VERSION	"1.8"
+#define AMPR_RIPD_VERSION	"1.9"
 
 //#define NL_DEBUG
 
@@ -170,7 +174,7 @@ typedef struct
 } route_entry;
 
 
-static char *usage_string = "\nAMPR RIPv2 daemon " AMPR_RIPD_VERSION "by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>]  [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-f <interface>] [-e <ip>]\n";
+static char *usage_string = "\nAMPR RIPv2 daemon " AMPR_RIPD_VERSION "by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>]  [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-w <window>] [-f <interface>] [-e <ip>]\n";
 
 
 int debug = FALSE;
@@ -186,7 +190,8 @@ uint32_t ignore_ip[MAXIGNORE];
 char *passwd = NULL;
 char *table = NULL;
 int nrtable;
-int rmetric = 0;
+uint32_t rmetric = 0;
+uint32_t rwindow = 840;
 char *fwif = NULL;
 char *fwdest = "224.0.0.9";
 
@@ -920,7 +925,6 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     struct rtmsg *rm;
 
     uint32_t result = 0;
-    uint32_t window = 840;
 
     mxrta->rta_type = RTA_METRICS;
     mxrta->rta_len = RTA_LENGTH(0);
@@ -983,8 +987,11 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
 	{
 	    addattr32(&req.hdr, sizeof(req), RTA_PRIORITY, rmetric); /* metrics */
 	}
-	rta_addattr32(mxrta, sizeof(mxbuf), RTAX_WINDOW, window);
-	addattr_len(&req.hdr, sizeof(req), RTA_METRICS, RTA_DATA(mxrta), RTA_PAYLOAD(mxrta));
+	if (rwindow>0)
+	{
+	    rta_addattr32(mxrta, sizeof(mxbuf), RTAX_WINDOW, rwindow);
+	    addattr_len(&req.hdr, sizeof(req), RTA_METRICS, RTA_DATA(mxrta), RTA_PAYLOAD(mxrta));
+	}
     }
 
     if ((nlsd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE)) < 0)
@@ -1362,10 +1369,10 @@ int main(int argc, char **argv)
 	
 	char databuf[BUFFERSIZE];
 	char *pload;
-	char *metric = NULL;
 	int len, plen;
+	pid_t sid;
 
-	while ((p = getopt(argc, argv, "dvsrh?i:a:p:t:m:f:e:")) != -1)
+	while ((p = getopt(argc, argv, "dvsrh?i:a:p:t:m:w:f:e:")) != -1)
 	{
 		switch (p)
 		{
@@ -1394,10 +1401,15 @@ int main(int argc, char **argv)
 			table = optarg;
 			break;
 		case 'm':
-			metric = optarg;
-			if (sscanf(metric, "%d", &rmetric)!=1)
+			if (sscanf(optarg, "%d", &rmetric)!=1)
 			{
 			    rmetric = 0;
+			}
+			break;
+		case 'w':
+			if (sscanf(optarg, "%d", &rwindow)!=1)
+			{
+			    rwindow = 840;
 			}
 			break;
 		case 'f':
@@ -1585,6 +1597,19 @@ int main(int argc, char **argv)
 			/* exit parent process */
 			exit(0);
 		}
+		
+		umask(0);
+		
+		sid = setsid();
+		if (sid < 0)
+		{
+		    PERROR("Can not set new session");
+		    exit(1);
+		}
+
+		close(STDIN_FILENO);
+		close(STDOUT_FILENO);
+		close(STDERR_FILENO);
 	}
 
 	/* daemon or debug */
