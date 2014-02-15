@@ -1,5 +1,5 @@
 /*
- * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.9
+ * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.10
  *
  * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
  *
@@ -11,24 +11,25 @@
  * Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-w <window>] [-f <interface>] [-e <ip>]
  *
  * Options:
- *          -?, -h                usage info
- *          -d                    debug mode: no daemonization, verbose output
- *          -v                    more verbose debug output
- *          -s                    save routes to /var/lib/ampr-ripd/encap.txt (encap format),
- *                                if this file exists, it will be loaded on startup regardless
+ *          -?, -h                Usage info
+ *          -d                    Debug mode: no daemonization, verbose output
+ *          -v                    More verbose debug output
+ *                                Using this option without debug leaves the console attached
+ *          -s                    Save routes to /var/lib/ampr-ripd/encap.txt (encap format),
+ *                                If this file exists, it will be loaded on startup regardless
  *                                of this option
- *          -r                    use raw socket instead of multicast
- *          -i <interface>        tunnel interface to use, defaults to 'tunl0'
- *          -t <table>            routing table to use, defaults to 'main'
- *          -a  <ip>[,<ip>...]    comma separated list of IPs/hostnames or encap style entries to be ignored
+ *          -r                    Use raw socket instead of multicast
+ *          -i <interface>        Tunnel interface to use, defaults to 'tunl0'
+ *          -t <table>            Routing table to use, defaults to 'main'
+ *          -a  <ip>[,<ip>...]    Comma separated list of IPs/hostnames or encap style entries to be ignored
  *                                (max. 10 hostnames or IPs, unlimited encap entries)
- *                                list contains local interface IPs by default
+ *                                The list contains local interface IPs by default
  *          -p <password>         RIPv2 password, defaults to none
  *          -m <metric>           Use given route metric to set routes, defaults to 0
  *          -w <window>           Sets TCP window size to the given value
  *                                A value of 0 skips window setting. Defaults to 840
- *          -f <interface>        interface for RIP forwarding, defaults to none/disabled
- *          -e <ip>               forward destination IP, defaults to 224.0.0.9 if enabled
+ *          -f <interface>        Interface for RIP forwarding, defaults to none/disabled
+ *          -e <ip>               Forward destination IP, defaults to 224.0.0.9 if enabled
  *
  *
  * Observation: All routes are created with protocol set to 44
@@ -62,6 +63,9 @@
  *    1.7     8.Feb.2014    Added support for dynamic hostnames and ampr subnets in the ignore list
  *    1.8    11.Feb.2014    Added option for route metric setting
  *    1.9    13.Feb.2014    Added window size setting option and console detaching on daemon startup
+ *    1.10   14.Feb.2014    Small fixes on option and signal processing (Tnx. Demetre, SV1UY)
+ *                          Use daemon() instead of fork()
+ *                          Option -v without debug keeps the console attached
  */
 
 #include <stdlib.h>
@@ -88,9 +92,7 @@
 #include <time.h>
 #include <ctype.h>
 
-#define AMPR_RIPD_VERSION	"1.9"
-
-//#define NL_DEBUG
+#define AMPR_RIPD_VERSION	"1.10"
 
 #define RTSIZE		1000	/* maximum number of route entries */
 #define EXPTIME		600	/* route expiration in seconds */
@@ -104,7 +106,7 @@
 #define MAXIGNORE	10	/* max number of hosts in the ignore list */
 
 #define FALSE	0
-#define TRUE	!FALSE
+#define TRUE	1
 
 #define RIP_HDR_LEN		4
 #define RIP_ENTRY_LEN		(2+2+4*4)
@@ -207,14 +209,14 @@ route_entry routes[RTSIZE];
 uint32_t myips[MYIPSIZE];
 
 
-char *ipv4_htoa(unsigned int ip)
+char *ipv4_htoa(uint32_t ip)
 {
     static char buf[INET_ADDRSTRLEN];
     sprintf(buf, "%d.%d.%d.%d", (ip & 0xff000000) >> 24, (ip & 0x00ff0000) >> 16, (ip & 0x0000ff00) >> 8, ip & 0x000000ff);
     return buf;
 }
 
-char *ipv4_ntoa(unsigned int ip)
+char *ipv4_ntoa(uint32_t ip)
 {
     unsigned int lip = ntohl(ip);
     return ipv4_htoa(lip);
@@ -265,9 +267,9 @@ void ilist_resolve(void)
 	{
 	    *nlist = 0;
 	}
-
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Ignoring host: %s", buf);
-
+#endif
 	ip = ns_resolv(buf);
 
 	if (ip != 0)
@@ -284,7 +286,9 @@ void ilist_resolve(void)
 	    if (ip != 0)
 	    {
 		ignore_ip[i] = ip;
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, " address: %s\n", ipv4_ntoa(ip));
+#endif
 		if (strcmp(plist, ipv4_ntoa(ip)) != 0)
 		{
 		    dns_ignore_lookup = TRUE;
@@ -293,7 +297,9 @@ void ilist_resolve(void)
 	    }
 	    else
 	    {
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, " - already in list\n");
+#endif
 	    }
 	}
 	else
@@ -301,12 +307,16 @@ void ilist_resolve(void)
 	    if (strstr(buf, "44.") == buf)
 	    {
 		encap_ignore = TRUE;
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, " - ampr entry\n");
+#endif
 	    }
+#ifdef HAVE_DEBUG
 	    else
 	    {
 		if (debug) fprintf(stderr, " - invalid hostname\n");
 	    }
+#endif
 	}
 
 	plist = strstr(plist, ",");
@@ -314,12 +324,13 @@ void ilist_resolve(void)
 
     } while ((i<MAXIGNORE) && (plist != NULL));
 
+#ifdef HAVE_DEBUG
     if (debug) 
     {
 	if (verbose) fprintf(stderr, "Total %d IPs in ignore lookup table.\n", i);
 	if (dns_ignore_lookup) fprintf(stderr, "Hostname usage found in ignore list - will do lookups after RIP update.\n");
     }
-
+#endif
 
     while (i<MAXIGNORE)
     {
@@ -401,22 +412,30 @@ void set_rt_table(char *arg)
     if (NULL == arg)
     {
 	nrtable =  RT_TABLE_MAIN;
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Using routing table 'main' (%d).\n", nrtable);
+#endif
     }
     else if (strcmp("default", arg) == 0)
     {
 	nrtable =  RT_TABLE_DEFAULT;
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Using routing table 'default' (%d).\n", nrtable);
+#endif
     }
     else if (strcmp("main", arg) == 0)
     {
 	nrtable =  RT_TABLE_MAIN;
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Using routing table 'main' (%d).\n", nrtable);
+#endif
     }
     else if (strcmp("local", arg) == 0)
     {
 	nrtable =  RT_TABLE_LOCAL;
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Using routing table 'local' (%d).\n", nrtable);
+#endif
     }
     else
     {
@@ -433,16 +452,22 @@ void set_rt_table(char *arg)
 	    {
 		/* fallback */
 		nrtable = RT_TABLE_MAIN;
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "Can not find routing table '%s'. Assuming table 'main' (%d)", table, nrtable);
+#endif
 	    }
+#ifdef HAVE_DEBUG
 	    if (debug) fprintf(stderr, "Using routing table (%d).\n", nrtable);
+#endif
 	}
 	else /* we have a table name  */
 	{
 	    rtf = fopen(RTAB_FILE, "r");
 	    if (NULL == rtf)
 	    {
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "Can not open routing table file '%s'. Assuming table main (254)\n", RTAB_FILE);
+#endif
 		nrtable = RT_TABLE_MAIN;
 	    }
 
@@ -454,7 +479,9 @@ void set_rt_table(char *arg)
 		    {
 			if (0 == strcmp(table, sbuffer))
 			{
+#ifdef HAVE_DEBUG
 			    if (debug) fprintf(stderr, "Using routing table '%s' (%d).\n", table, nrtable);
+#endif
 			    return;
 			}
 		    }
@@ -463,7 +490,9 @@ void set_rt_table(char *arg)
 		continue;
 	    }
 	    nrtable = RT_TABLE_MAIN;
+#ifdef HAVE_DEBUG
 	    if (debug) fprintf(stderr, "Can not find routing table %s. Assuming table 'main' (%d)", table, nrtable);
+#endif
 	    fclose (rtf);
 	}
     }
@@ -490,12 +519,16 @@ void detect_myips(void)
     {
 	ipaddr = getip(names[i].if_name);
 
+#ifdef HAVE_DEBUG
 	if (debug && verbose) fprintf(stderr, "Interface detected: %s, IP: %s\n", names[i].if_name, ipv4_ntoa(ipaddr));
+#endif
 
 	if (strcmp(names[i].if_name, tunif) == 0)
 	{
 	    tunidx = names[i].if_index;
+#ifdef HAVE_DEBUG
 	    if (debug && verbose) fprintf(stderr, "Assigned tunnel interface index: %u\n", tunidx);
+#endif
 	}
 
 	/* check if address not already there */
@@ -510,6 +543,7 @@ void detect_myips(void)
 
     if_freenameindex(names);
 
+#ifdef HAVE_DEBUG
     if (debug && verbose)
     {
 	fprintf(stderr, "Local IPs:\n");
@@ -519,9 +553,10 @@ void detect_myips(void)
 	    fprintf(stderr, "   %s\n", ipv4_ntoa(myips[i]));
 	}
     }
+#endif
 }
 
-int check_ignore(unsigned int ip)
+int check_ignore(uint32_t ip)
 {
 	int i;
 	
@@ -543,7 +578,7 @@ int check_ignore(unsigned int ip)
 	return FALSE;
 };
 
-int check_ignore_encap(uint32_t ip, int mask)
+int check_ignore_encap(uint32_t ip, uint32_t mask)
 {
     char *plist = ilist;
     char *nlist;
@@ -589,7 +624,7 @@ int check_ignore_encap(uint32_t ip, int mask)
     return FALSE;
 }
 
-void list_add(unsigned int address, unsigned int netmask, unsigned int nexthop)
+void list_add(uint32_t address, uint32_t netmask, uint32_t nexthop)
 {
     int i;
 
@@ -606,10 +641,12 @@ void list_add(unsigned int address, unsigned int netmask, unsigned int nexthop)
 	}
     }
 
+#ifdef HAVE_DEBUG
     if (RTSIZE == i)
     {
 	if (debug) fprintf(stderr, "Can not find an unused route entry.\n");
     }
+#endif
 }
 
 int list_count(void)
@@ -627,7 +664,7 @@ int list_count(void)
     return count;
 }
 
-int list_find(unsigned int address, unsigned int netmask)
+int list_find(uint32_t address, uint32_t netmask)
 {
     int i;
 
@@ -649,7 +686,7 @@ int list_find(unsigned int address, unsigned int netmask)
     }
 }
 
-void list_update(unsigned int address, unsigned int netmask, unsigned int nexthop)
+void list_update(uint32_t address, uint32_t netmask, uint32_t nexthop)
 {
     int entry;
     entry = list_find(address, netmask);
@@ -695,14 +732,18 @@ void save_encap(void)
 
 	if ((FALSE == updated) || (FALSE == save))
 	{
+#ifdef HAVE_DEBUG
 	    if (debug && verbose) fprintf(stderr, "Saving to encap file not needed.\n");
+#endif
 	    return;
 	}
 
 	efd = fopen(RTFILE, "w+");
 	if (NULL == efd)
 	{
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "Can not open encap file for writing: %s\n", RTFILE);
+#endif
 		return;
 	}
 
@@ -744,7 +785,9 @@ void load_encap(void)
 	efd = fopen(RTFILE, "r");
 	if (NULL == efd)
 	{
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "Can not open encap file for reading: %s\n", RTFILE);
+#endif
 		return;
 	}
 
@@ -783,16 +826,20 @@ void load_encap(void)
 			}
 		    }
 
+#ifdef HAVE_DEBUG
 		    if (RTSIZE == i)
 		    {
 			if (debug) fprintf(stderr, "Can not find an unused route entry.\n");
 		    }
+#endif
 
 		    count++;
 		}
 	}
 
+#ifdef HAVE_DEBUG
 	if (debug && verbose) fprintf(stderr, "Loaded %d entries from %s\n", count, RTFILE);
+#endif
 
 	fclose(efd);
 }
@@ -804,7 +851,9 @@ int addattr_len(struct nlmsghdr *n, int maxlen, int type, const void *data, int 
 
     if ((NLMSG_ALIGN(n->nlmsg_len) + len) > maxlen)
     {
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Max allowed length exceeded during NLMSG assembly.\n");
+#endif
 	return -1;
     }
     rta = NLMSG_TAIL(n);
@@ -821,7 +870,9 @@ int rta_addattr_len(struct rtattr *rta, int maxlen, int type, const void *data, 
     int len = RTA_LENGTH(alen);
     if ((RTA_ALIGN(rta->rta_len) + RTA_ALIGN(len)) > maxlen)
     {
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Max allowed length exceeded during sub-RTA assembly.\n");
+#endif
 	return -1;
     }
 
@@ -833,6 +884,7 @@ int rta_addattr_len(struct rtattr *rta, int maxlen, int type, const void *data, 
     return 0;
 }
 
+#ifdef HAVE_DEBUG
 #ifdef NL_DEBUG
 void nl_debug(void *msg, int len)
 {
@@ -900,6 +952,7 @@ void nl_debug(void *msg, int len)
 	}
     }
 }
+#endif
 #endif
 
 uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint32_t nexthop)
@@ -996,29 +1049,39 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
 
     if ((nlsd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE)) < 0)
     {
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Can not open netlink socket.\n");
+#endif
 	return 0;
     }
 
     if (bind(nlsd, (struct sockaddr *)&sa, sizeof(sa)) < 0)
     {
+#ifdef HAVE_DEBUG
         if (debug) fprintf(stderr, "Can not bind to netlink socket.\n");
+#endif
 	return 0;
     }
+#ifdef HAVE_DEBUG
 #ifdef NL_DEBUG
     if (debug && verbose) fprintf(stderr, "NL sending request.\n");
     nl_debug(&req, req.hdr.nlmsg_len);
 #endif
+#endif
     if (send(nlsd, &req, req.hdr.nlmsg_len, 0) < 0)
     {
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Can not talk to rtnetlink.\n");
+#endif
     }
 
     if ((len = recv(nlsd, nlrxbuf, sizeof(nlrxbuf), MSG_DONTWAIT|MSG_PEEK)) > 0)
     {
+#ifdef HAVE_DEBUG
 #ifdef NL_DEBUG
 	if (debug && verbose) fprintf(stderr, "NL response received.\n");
 	nl_debug(nlrxbuf, len);
+#endif
 #endif
 	if (ROUTE_GET == action)
 	{
@@ -1054,11 +1117,13 @@ void route_update(uint32_t address, uint32_t netmask, uint32_t nexthop)
 	    route_func(ROUTE_DEL, address, netmask, 0); /* fails if route does not exist - no problem */
 	    if (route_func(ROUTE_ADD, address, netmask, nexthop) == 0)
 	    {
+#ifdef HAVE_DEBUG
 		if (debug)
 		{
 		    fprintf(stderr, "Failed to set route %s/%d via ", ipv4_ntoa(address), netmask);
 		    fprintf(stderr, "%s on dev %s. ", ipv4_ntoa(nexthop), tunif);
 		}
+#endif
 	    }
 	}
 }
@@ -1067,7 +1132,9 @@ void route_delete_all(void)
 {
 	int i;
 
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Clearing routes (%d).\n", list_count());
+#endif
 
 	for(i=0; i<RTSIZE; i++)
 	{
@@ -1082,8 +1149,10 @@ void route_delete_all(void)
 void route_set_all(void)
 {
 	int i;
-
+	
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Setting routes (%d).\n", list_count());
+#endif
 
 	for(i=0; i<RTSIZE; i++)
 	{
@@ -1102,18 +1171,24 @@ int process_auth(char *buf, int len, int needed)
 	{
 		if (auth->auth != 0xFFFF)
 		{
+#ifdef HAVE_DEBUG
 			if (debug) fprintf(stderr, "Password auth requested but no password found in first RIPv2 message.\n");
+#endif
 			return -1;
 		}
 		if (ntohs(auth->type) != RIP_AUTH_PASSWD)
 		{
+#ifdef HAVE_DEBUG
 			if (debug) fprintf(stderr, "Unsupported authentication type %d.\n", ntohs(auth->type));
+#endif
 			return -1;
 		}
 
 		if (strcmp((char *)auth->pass, passwd) != 0)
 		{
+#ifdef HAVE_DEBUG
 			if (debug) fprintf(stderr, "Invalid password.\n");
+#endif
 			return -1;
 		}
 	}
@@ -1121,7 +1196,10 @@ int process_auth(char *buf, int len, int needed)
 	{
 		if (auth->auth == 0xFFFF)
 		{
+#ifdef HAVE_DEBUG
 			if (debug) fprintf(stderr, "Password found in first RIPv2 message but not set.\n");
+#endif
+			
 			if (ntohs(auth->type) == RIP_AUTH_PASSWD)
 			{
 				if (debug) fprintf(stderr, "Simple password: %s\n", auth->pass);
@@ -1140,7 +1218,9 @@ void process_entry(char *buf)
 	
 	if (ntohs(rip->af) != RIP_AF_INET)
 	{
+#ifdef HAVE_DEBUG
 		if (debug && verbose) fprintf(stderr, "Unsupported address family %d.\n", ntohs(rip->af));
+#endif
 		return;
 	}
 
@@ -1157,17 +1237,21 @@ void process_entry(char *buf)
 	    mask <<= 1;
 	}
 
+#ifdef HAVE_DEBUG
 	if (debug && verbose)
 	{
 		fprintf(stderr, "Entry: address %s/%d ", ipv4_ntoa(rip->address), netmask);
 		fprintf(stderr, "nexthop %s ", ipv4_ntoa(rip->nexthop));
 		fprintf(stderr, "metric %d", ntohl(rip->metric));
 	}
+#endif
 
 	/* drop 44.0.0.1 */
 	if (rip->address == inet_addr("44.0.0.1"))
 	{
+#ifdef HAVE_DEBUG
 	    if (debug && verbose) fprintf(stderr, " - rejected\n");
+#endif
 	    return;
 	}
 
@@ -1177,25 +1261,35 @@ void process_entry(char *buf)
 
 	if (ntohl(rip->metric) > 14)
 	{
+#ifdef HAVE_DEBUG
 		if (debug && verbose) fprintf(stderr, " - unreacheable");
+#endif
 		if ((i = list_find(rip->address, netmask)) != -1)
 		{
 			route_func(ROUTE_DEL, rip->address, netmask, 0);
 			list_remove(i);
+#ifdef HAVE_DEBUG
 			if (debug && verbose) fprintf(stderr, ", removed from list");
+#endif
 		}
+#ifdef HAVE_DEBUG
 		if (debug && verbose) fprintf(stderr, ".\n");
+#endif
 		return;
 	}
 
 	/* check if in ignore list */
 	if (check_ignore(rip->nexthop) || check_ignore_encap(rip->address, netmask))
 	{
+#ifdef HAVE_DEBUG
 		if (debug && verbose) fprintf(stderr, " - in ignore list, rejected\n");
+#endif
 		return;
 	}
 
+#ifdef HAVE_DEBUG
 	if (debug && verbose) fprintf(stderr, "\n");
+#endif
 
 	/* update routes */
 	route_update(rip->address, netmask, rip->nexthop);
@@ -1209,17 +1303,23 @@ int process_message(char *buf, int len)
 
 	if (len < RIP_HDR_LEN + RIP_ENTRY_LEN)
 	{
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "RIP packet to short: %d bytes", len);
+#endif
 		return -1;
 	}
 	if (len > RIP_HDR_LEN + RIP_ENTRY_LEN * 25)
 	{
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "RIP packet to long: %d bytes", len);
+#endif
 		return -1;
 	}
 	if ((len - RIP_HDR_LEN)%RIP_ENTRY_LEN != 0)
 	{
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "RIP invalid packet length: %d bytes", len);
+#endif
 		return -1;
 	}
 
@@ -1227,23 +1327,31 @@ int process_message(char *buf, int len)
 
 	hdr = (rip_header *)buf;
 
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "RIP len %d header version %d, Command %d (%s)\n", len, hdr->version, hdr->command, rip_pcmd(hdr->command));
+#endif
 
 	if (hdr->command != RIP_CMD_RESPONSE)
 	{
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "Ignored non-response packet\n");
+#endif
 		return -1;
 	}
 
 	if (hdr->version != 2)
 	{
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "Ignored RIP version %d packet (only accept version 2).\n", hdr->version);
+#endif
 		return -1;
 	}
 
 	if (hdr->zeros)
 	{
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "Ignored packet: zero bytes are not zero.\n");
+#endif
 		return -1;
 	}
 
@@ -1261,7 +1369,9 @@ int process_message(char *buf, int len)
 			return -1;
 		}
 
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "Simple password authentication successful.\n");
+#endif
 		
 		buf += RIP_ENTRY_LEN;
 		len -= RIP_ENTRY_LEN;
@@ -1278,14 +1388,18 @@ int process_message(char *buf, int len)
 
 	if (len == 0)
 	{
+#ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "No routing entries in this packet.\n");
+#endif
 		return -1;
 	}
 
 	/* we have some entries */
 
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Processing RIPv2 packet, %d entries ", len/RIP_ENTRY_LEN);
 	if (debug && verbose) fprintf(stderr, "\n");
+#endif
 
 	while (len >= RIP_ENTRY_LEN)
 	{
@@ -1294,7 +1408,9 @@ int process_message(char *buf, int len)
 		len -= RIP_ENTRY_LEN;
 	}
 
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "(total %d entries).\n", list_count());
+#endif
 
 	/* schedule a route expire check in 30 sec - we do this only if we have route reception */
 	/* else we will keep the routes because there are no updates sources available!         */
@@ -1305,9 +1421,12 @@ int process_message(char *buf, int len)
 
 static void on_term(int sig)
 {
+#ifdef HAVE_DEBUG
 	if (debug && verbose) fprintf(stderr, "SIGTERM/SIGKILL received.\n");
+#endif
 	close(fwsd);
 	close(tunsd);
+	route_delete_all();
 	exit(0); 
 }
 
@@ -1316,11 +1435,13 @@ static void on_alarm(int sig)
 	int i;
 	int count = 0;
 
+#ifdef HAVE_DEBUG
 	if (debug)
 	{
 		fprintf(stderr, "SIGALRM received.\n");
 		fprintf(stderr, "Checking for expired routes.\n");
 	}
+#endif
 
 	/* recheck for dynamic ignore list entries if hostnames are in use */
 	if (dns_ignore_lookup)
@@ -1340,24 +1461,29 @@ static void on_alarm(int sig)
 		}
 	}
 
+#ifdef HAVE_DEBUG
 	if (debug)
 	{
 		fprintf(stderr, "Routes expired: %d.\n", count);
 		fprintf(stderr, "Saving routes to disk.\n");
 	}
+#endif
 
 	save_encap();
 
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "(total %d entries).\n", list_count());
+#endif
 }
 
 static void on_hup(int sig)
 {
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "SIGHUP received!\n");
-
-	ilist_resolve();
+#endif
 	route_delete_all();
 	list_clear();
+	updated = TRUE;
 }
 
 int main(int argc, char **argv)
@@ -1370,7 +1496,7 @@ int main(int argc, char **argv)
 	char databuf[BUFFERSIZE];
 	char *pload;
 	int len, plen;
-	pid_t sid;
+	int lval;
 
 	while ((p = getopt(argc, argv, "dvsrh?i:a:p:t:m:w:f:e:")) != -1)
 	{
@@ -1401,15 +1527,15 @@ int main(int argc, char **argv)
 			table = optarg;
 			break;
 		case 'm':
-			if (sscanf(optarg, "%d", &rmetric)!=1)
+			if (sscanf(optarg, "%d", &lval)==1)
 			{
-			    rmetric = 0;
+			    rmetric = (uint32_t) lval;
 			}
 			break;
 		case 'w':
-			if (sscanf(optarg, "%d", &rwindow)!=1)
+			if (sscanf(optarg, "%d", &lval)==1)
 			{
-			    rwindow = 840;
+			    rwindow = (uint32_t) lval;
 			}
 			break;
 		case 'f':
@@ -1429,7 +1555,10 @@ int main(int argc, char **argv)
 	if (debug && verbose)
 	{
 		fprintf(stderr, "Using metric %d for routes.\n", rmetric);
+		fprintf(stderr, "Using TCP window %d for routes.\n", rwindow);
+#ifdef HAVE_DEBUG
 		if (NULL !=ilist) fprintf(stderr, "Ignore list: %s\n", ilist);
+#endif
 	}
 
 	ilist_resolve();
@@ -1440,15 +1569,19 @@ int main(int argc, char **argv)
 	load_encap();
 
 	seq = time(NULL);
-	
+
+#ifdef HAVE_DEBUG
 	if (debug && verbose)
 	{
 		fprintf(stderr, "Max list size: %d entries\n", RTSIZE);
 	}
+#endif
 
 	tunaddr = getip(tunif);
 
+#ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "Detected tunnel interface address: %s\n", ipv4_ntoa(tunaddr));
+#endif
 
 	detect_myips();
 
@@ -1458,7 +1591,9 @@ int main(int argc, char **argv)
 	{
 	    /* create multicast listen socket on tunnel */
 
+#ifdef HAVE_DEBUG
 	    if (debug) fprintf(stderr, "Creating RIP UDP listening socket.\n");
+#endif
 
 	    if ((tunsd = socket(PF_INET, SOCK_RAW, 4)) < 0)
 	    {
@@ -1471,7 +1606,9 @@ int main(int argc, char **argv)
 	
 	    /* create multicast listen socket on tunnel */
 
+#ifdef HAVE_DEBUG
 	    if (debug) fprintf(stderr, "Creating RIP UDP listening socket.\n");
+#endif
 
 	    if ((tunsd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0)
 	    {
@@ -1479,7 +1616,9 @@ int main(int argc, char **argv)
 		return 1;
 	    }
 
+#ifdef HAVE_DEBUG
 	    if (debug && verbose) fprintf(stderr, "Setting up multicast interface.\n");
+#endif
 
 	    int reuse = 1;
 	    if (setsockopt(tunsd, SOL_SOCKET, SO_REUSEADDR, (char *)&reuse, sizeof(reuse)) < 0)
@@ -1538,8 +1677,9 @@ int main(int argc, char **argv)
 	if (NULL != fwif)
 	{
 		/* create the forward socket */
+#ifdef HAVE_DEBUG
 		if (debug && verbose) fprintf(stderr, "Setting up forwarding interface.\n");
-
+#endif
 		if ((fwsd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0)
 		{
 			PERROR("Forward socket");
@@ -1574,43 +1714,22 @@ int main(int argc, char **argv)
 		sin.sin_port = htons(IPPORT_ROUTESERVER);
 	}
 
-	signal(SIGTERM, on_term);
-	signal(SIGKILL, on_term);
-	signal(SIGHUP, on_hup);
-	signal(SIGALRM, on_alarm);
-
 	/* networking up and running */
 
 	if (FALSE == debug)
 	{
 		/* try to become a daemon */
-		pid_t fork_res = -1;
-		fork_res = fork();
 		
-		if (-1 == fork_res)
+		if (daemon(0,verbose)<0)
 		{
-			PERROR("Can not become a daemon");
+		    PERROR("Can not become a daemon");
 		}
-		
-		if (0 != fork_res)
-		{
-			/* exit parent process */
-			exit(0);
-		}
-		
-		umask(0);
-		
-		sid = setsid();
-		if (sid < 0)
-		{
-		    PERROR("Can not set new session");
-		    exit(1);
-		}
-
-		close(STDIN_FILENO);
-		close(STDOUT_FILENO);
-		close(STDERR_FILENO);
 	}
+
+	signal(SIGTERM, on_term);
+	signal(SIGKILL, on_term);
+	signal(SIGHUP, on_hup);
+	signal(SIGALRM, on_alarm);
 
 	/* daemon or debug */
 

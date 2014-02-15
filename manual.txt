@@ -13,6 +13,7 @@
           -?, -h                Usage info
           -d                    Debug mode: no daemonization, verbose output
           -v                    More verbose debug output
+                                Using this option without debug leaves the console attached
           -s                    Save routes to /var/lib/ampr-ripd/encap.txt (encap format),
                                 if this file exists, it will be loaded on startup regardless
                                 of this option
@@ -34,6 +35,21 @@
           -e <ip>               Forward destination IP, defaults to 224.0.0.9 if enabled
 
  Observation: All routes are created with protocol 44 for easy management
+
+
+ Signal handling:
+
+   - On signal SIG_HUP, ampr-ripd will delete all set routes, but will remain active,
+     so routes will be set again on next received RIPv2 set, and the saved encap file updated.
+   - On exit (SIG_TERM), ampr-ripd will delete all set routes and exit.
+
+ Debug:
+
+   - As set up in the makefile, wiyh the default debug level, using the -d option,
+     the daemon will stay in the forground and allow you to find the RIPv2 password
+     (see the find_pass.sh shell script).
+   - To have full debug output, it has to be compiled with -D HAVE_DEBUG  or by
+     uncommenting the right DOPT line.
 
 
  ************************************************************************
@@ -66,6 +82,9 @@
  *    1.7      8.Feb.2014      Added support for dynamic hostnames and ampr subnets in the exclude list
  *    1.8     11.Feb.2014      Added option for route metric setting
  *    1.9     13.Feb.2014      Added window size setting option and console detaching on daemon startup
+ *    1.10    14.Feb.2014      Small fixes on option and signal processing (Tnx. Demetre, SV1UY))
+ *                             Using daemon() instead of fork().
+ *                             Option -v without debug keeps console attached
 
  INSTALLATION
  ------------
@@ -74,11 +93,12 @@
  -Create the folder /var/lib/ampr-ripd
  -Launch with proper parameters as described above
 Or:
- -Just do a 'make install' in the source folder.
+ -Just do a 'make install' in the source folder,
+
 
  KNOWN ISSUES
  ------------
  - when using other table than 'main', interogating the routes via netlink does not work properly.
-   This means that on any update, the route is deleted and than recreated, even if it is already set correctly.
-   This should be no problem since this happen only at startup on encap loading and on route changes.
+   This means that on any update, the route is deleted and then recreated, even if it is already set correctly.
+   This should be no problem since this happen only at startup on encap loading and on route change.
 
