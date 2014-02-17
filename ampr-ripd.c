@@ -1,5 +1,5 @@
 /*
- * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.10
+ * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.11
  *
  * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
  *
@@ -66,6 +66,7 @@
  *    1.10   14.Feb.2014    Small fixes on option and signal processing (Tnx. Demetre, SV1UY)
  *                          Use daemon() instead of fork()
  *                          Option -v without debug keeps the console attached
+ *    1.11   17.Feb.2014    Changed netlink route handling to overwrite/delete only routes written by ampr-ripd
  */
 
 #include <stdlib.h>
@@ -92,7 +93,7 @@
 #include <time.h>
 #include <ctype.h>
 
-#define AMPR_RIPD_VERSION	"1.10"
+#define AMPR_RIPD_VERSION	"1.11"
 
 #define RTSIZE		1000	/* maximum number of route entries */
 #define EXPTIME		600	/* route expiration in seconds */
@@ -995,6 +996,7 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     req.hdr.nlmsg_pid = getpid();
     req.rtm.rtm_family = AF_INET;
     req.rtm.rtm_dst_len = netmask;
+    req.rtm.rtm_protocol = RTPROT_AMPR;
 
     if (NULL == table)
     {
@@ -1007,7 +1009,6 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
 
     if (ROUTE_DEL == action)
     {
-        req.rtm.rtm_protocol = RTPROT_AMPR;
         req.rtm.rtm_scope = RT_SCOPE_NOWHERE;
         req.rtm.rtm_type = RTN_UNICAST;
         req.hdr.nlmsg_type = RTM_DELROUTE;
@@ -1017,8 +1018,6 @@ uint32_t route_func(rt_actions action, uint32_t address, uint32_t netmask, uint3
     else if (ROUTE_ADD == action)
     {
 	req.rtm.rtm_flags |= RTNH_F_ONLINK;
-	req.rtm.rtm_protocol = RTPROT_AMPR;
-	
 	req.rtm.rtm_type = RTN_UNICAST;
 	req.hdr.nlmsg_type = RTM_NEWROUTE;
 	req.hdr.nlmsg_flags |= NLM_F_CREATE;

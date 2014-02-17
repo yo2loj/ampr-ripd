@@ -85,6 +85,7 @@
  *    1.10    14.Feb.2014      Small fixes on option and signal processing (Tnx. Demetre, SV1UY))
  *                             Using daemon() instead of fork().
  *                             Option -v without debug keeps console attached
+ *    1.11    17.Feb.2014      Changed netlink route handling to overwrite/delete only routes written by ampr-ripd
 
  INSTALLATION
  ------------
