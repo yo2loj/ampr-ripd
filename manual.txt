@@ -7,7 +7,7 @@
  Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
 
 
- Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-f <interface>] [-e <ip>]
+ Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-f <interface>] [-e <ip>] [-x <system command>]
 
  Options:
           -?, -h                Usage info
@@ -33,6 +33,7 @@
           -p <password>         RIPv2 password, defaults to none
           -f <interface>        Interface for RIP forwarding, defaults to none/disabled
           -e <ip>               Forward destination IP, defaults to 224.0.0.9 if enabled
+          -x <system command>   Execute this system command after route set/change. If the command includes white spaces, use quotes.
 
  Observation: All routes are created with protocol 44 for easy management
 
@@ -86,6 +87,9 @@
  *                             Using daemon() instead of fork().
  *                             Option -v without debug keeps console attached
  *    1.11    17.Feb.2014      Changed netlink route handling to overwrite/delete only routes written by ampr-ripd
+ *    1.12    16.Nov.2014      Added the execution of a system command after route setting/change. This is done
+ *                             on startup with encap file present and 30 seconds after RIP update if encap changes.
+ *                             (Tnx. Rob, PE1CHL for the idea)
 
  INSTALLATION
  ------------

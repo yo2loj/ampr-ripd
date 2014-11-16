@@ -1,5 +1,5 @@
 /*
- * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.11
+ * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.12
  *
  * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
  *
@@ -8,7 +8,7 @@
  * Compile with: gcc -O2 -o ampr-ripd ampr-ripd.c
  *
  *
- * Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-w <window>] [-f <interface>] [-e <ip>]
+ * Usage: ampr-ripd [-?|-h] [-d] [-v] [-s] [-r] [-i <interface>] [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-w <window>] [-f <interface>] [-e <ip>] [-x <system command>]
  *
  * Options:
  *          -?, -h                Usage info
@@ -30,6 +30,7 @@
  *                                A value of 0 skips window setting. Defaults to 840
  *          -f <interface>        Interface for RIP forwarding, defaults to none/disabled
  *          -e <ip>               Forward destination IP, defaults to 224.0.0.9 if enabled
+ *          -x <system command>   Execute this system command after route set/change
  *
  *
  * Observation: All routes are created with protocol set to 44
@@ -67,6 +68,9 @@
  *                          Use daemon() instead of fork()
  *                          Option -v without debug keeps the console attached
  *    1.11   17.Feb.2014    Changed netlink route handling to overwrite/delete only routes written by ampr-ripd
+ *    1.12   16.Nov.2014    Added the execution of a system command after route setting/changing. This is done
+ *                          on startup with encap file present and 30 seconds after RIP update if encap changes
+ *                          (Tnx. Rob, PE1CHL for the idea)
  */
 
 #include <stdlib.h>
@@ -93,7 +97,7 @@
 #include <time.h>
 #include <ctype.h>
 
-#define AMPR_RIPD_VERSION	"1.11"
+#define AMPR_RIPD_VERSION	"1.12"
 
 #define RTSIZE		1000	/* maximum number of route entries */
 #define EXPTIME		600	/* route expiration in seconds */
@@ -177,7 +181,7 @@ typedef struct
 } route_entry;
 
 
-static char *usage_string = "\nAMPR RIPv2 daemon " AMPR_RIPD_VERSION "by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>]  [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-w <window>] [-f <interface>] [-e <ip>]\n";
+static char *usage_string = "\nAMPR RIPv2 daemon " AMPR_RIPD_VERSION "by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>]  [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-w <window>] [-f <interface>] [-e <ip>] [-x <system command>]\n";
 
 
 int debug = FALSE;
@@ -197,6 +201,7 @@ uint32_t rmetric = 0;
 uint32_t rwindow = 840;
 char *fwif = NULL;
 char *fwdest = "224.0.0.9";
+char *syscmd = NULL;
 
 int tunsd;
 int fwsd;
@@ -736,38 +741,50 @@ void save_encap(void)
 #ifdef HAVE_DEBUG
 	    if (debug && verbose) fprintf(stderr, "Saving to encap file not needed.\n");
 #endif
-	    return;
 	}
-
-	efd = fopen(RTFILE, "w+");
-	if (NULL == efd)
+	else
 	{
+	    efd = fopen(RTFILE, "w+");
+	    if (NULL == efd)
+	    {
 #ifdef HAVE_DEBUG
 		if (debug) fprintf(stderr, "Can not open encap file for writing: %s\n", RTFILE);
 #endif
-		return;
-	}
+	    }
+	    else
+	    {
 
-	clock = time(NULL);
+		clock = time(NULL);
 
-	fprintf(efd, "#\n");
-	fprintf(efd, "# encap.txt file - saved by ampr-ripd (UTC) %s", asctime(gmtime(&clock)));
-	fprintf(efd, "#\n");
+		fprintf(efd, "#\n");
+		fprintf(efd, "# encap.txt file - saved by ampr-ripd (UTC) %s", asctime(gmtime(&clock)));
+		fprintf(efd, "#\n");
 
-	for (i=0; i<RTSIZE; i++)
-	{
-		if (0 != routes[i].timestamp)
+		for (i=0; i<RTSIZE; i++)
 		{
-		    fprintf(efd, "route addprivate %s", idx_encap(i));
-		    fprintf(efd, "/%d encap ", routes[i].netmask);
-		    fprintf(efd, "%s\n", ipv4_ntoa(routes[i].nexthop));
+		    if (0 != routes[i].timestamp)
+		    {
+			fprintf(efd, "route addprivate %s", idx_encap(i));
+			fprintf(efd, "/%d encap ", routes[i].netmask);
+			fprintf(efd, "%s\n", ipv4_ntoa(routes[i].nexthop));
+		    }
 		}
+
+		fprintf(efd, "# --EOF--\n");
+
+		fclose(efd);
+	    }
 	}
 
-	fprintf(efd, "# --EOF--\n");
+	if ((NULL != syscmd) && (TRUE == updated))
+	{
+	    i = system(syscmd);
+	    if ((0 != i) && debug)
+	    {
+		fprintf(stderr, "Error executing \"%s\"\n", syscmd);
+	    }
+	}
 
-	fclose(efd);
-	
 	updated = FALSE;
 }
 
@@ -843,6 +860,9 @@ void load_encap(void)
 #endif
 
 	fclose(efd);
+
+	if (count) updated = TRUE;
+
 }
 
 int addattr_len(struct nlmsghdr *n, int maxlen, int type, const void *data, int alen)
@@ -1160,6 +1180,17 @@ void route_set_all(void)
 			route_update(routes[i].address, routes[i].netmask, routes[i].nexthop);
 		}
 	}
+
+	if ((NULL != syscmd) && updated)
+	{
+	    i = system(syscmd);
+	    if ((0 != i) && debug)
+	    {
+		fprintf(stderr, "Error executing \"%s\"\n", syscmd);
+	    }
+	}
+
+	updated = FALSE;
 }
 
 int process_auth(char *buf, int len, int needed)
@@ -1473,6 +1504,7 @@ static void on_alarm(int sig)
 #ifdef HAVE_DEBUG
 	if (debug) fprintf(stderr, "(total %d entries).\n", list_count());
 #endif
+
 }
 
 static void on_hup(int sig)
@@ -1497,7 +1529,7 @@ int main(int argc, char **argv)
 	int len, plen;
 	int lval;
 
-	while ((p = getopt(argc, argv, "dvsrh?i:a:p:t:m:w:f:e:")) != -1)
+	while ((p = getopt(argc, argv, "dvsrh?i:a:p:t:m:w:f:e:x:")) != -1)
 	{
 		switch (p)
 		{
@@ -1543,6 +1575,9 @@ int main(int argc, char **argv)
 		case 'e':
 			fwdest = optarg;
 			break;
+		case 'x':
+			syscmd = optarg;
+			break;
 		case ':':
 		case 'h':
 		case '?':
@@ -1555,6 +1590,7 @@ int main(int argc, char **argv)
 	{
 		fprintf(stderr, "Using metric %d for routes.\n", rmetric);
 		fprintf(stderr, "Using TCP window %d for routes.\n", rwindow);
+		if (NULL != syscmd) fprintf(stderr, "Executing system command \"%s\" on encap load/save\n", syscmd);
 #ifdef HAVE_DEBUG
 		if (NULL !=ilist) fprintf(stderr, "Ignore list: %s\n", ilist);
 #endif
