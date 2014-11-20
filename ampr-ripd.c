@@ -1,5 +1,5 @@
 /*
- * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.12
+ * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.13
  *
  * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
  *
@@ -71,6 +71,10 @@
  *    1.12   16.Nov.2014    Added the execution of a system command after route setting/changing. This is done
  *                          on startup with encap file present and 30 seconds after RIP update if encap changes
  *                          (Tnx. Rob, PE1CHL for the idea)
+ *    1.13   20.Nov.2014    Ignore subnets for which the gateway is inside their own subnet
+ *                          Reconstruct forwarded RIP messages to be able to send them even on ampr-gw outages
+ *                          Forwarded RIP messages do not use authentication anymore
+ *                          Forwarded RIP messages are sent 30 seconds after a RIP update, otherwise every 29 seconds
  */
 
 #include <stdlib.h>
@@ -97,7 +101,7 @@
 #include <time.h>
 #include <ctype.h>
 
-#define AMPR_RIPD_VERSION	"1.12"
+#define AMPR_RIPD_VERSION	"1.13"
 
 #define RTSIZE		1000	/* maximum number of route entries */
 #define EXPTIME		600	/* route expiration in seconds */
@@ -181,6 +185,13 @@ typedef struct
 } route_entry;
 
 
+typedef struct
+{
+    rip_header header;
+    rip_entry entries[25];
+} rip_packet;
+
+
 static char *usage_string = "\nAMPR RIPv2 daemon " AMPR_RIPD_VERSION "by Marius, YO2LOJ\n\nUsage: ampr-ripd [-d] [-v] [-s] [-r] [-i <interface>]  [-t <table>] [-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [-p <password>] [-m <metric>] [-w <window>] [-f <interface>] [-e <ip>] [-x <system command>]\n";
 
 
@@ -207,13 +218,13 @@ int tunsd;
 int fwsd;
 int seq;
 int updated = FALSE;
+int update_encap = FALSE;
 int dns_ignore_lookup = FALSE;
 int encap_ignore = FALSE;
 
 route_entry routes[RTSIZE];
 
 uint32_t myips[MYIPSIZE];
-
 
 char *ipv4_htoa(uint32_t ip)
 {
@@ -1287,8 +1298,16 @@ void process_entry(char *buf)
 
 	/* validate and update the route */
 
-	/* remove if unreachable and in list */
+	/* drop routes with gw in their own subnet */
+	if ((rip->address << (32 - netmask)) == (rip->nexthop << (32 - netmask)))
+	{
+#ifdef HAVE_DEBUG
+	    if (debug && verbose) fprintf(stderr, " - rejected\n");
+#endif
+	    return;
+	}
 
+	/* remove if unreachable and in list */
 	if (ntohl(rip->metric) > 14)
 	{
 #ifdef HAVE_DEBUG
@@ -1444,6 +1463,7 @@ int process_message(char *buf, int len)
 
 	/* schedule a route expire check in 30 sec - we do this only if we have route reception */
 	/* else we will keep the routes because there are no updates sources available!         */
+	update_encap = TRUE;
 	alarm(30);
 
 	return 0;
@@ -1465,23 +1485,33 @@ static void on_alarm(int sig)
 	int i;
 	int count = 0;
 
-#ifdef HAVE_DEBUG
-	if (debug)
+	struct sockaddr_in sin;
+	rip_packet rp;
+	int rip_nr;
+	int route_nr;
+	int size;
+
+	if (TRUE == update_encap)
 	{
+	    update_encap = FALSE;
+
+#ifdef HAVE_DEBUG
+	    if (debug)
+	    {
 		fprintf(stderr, "SIGALRM received.\n");
 		fprintf(stderr, "Checking for expired routes.\n");
-	}
+	    }
 #endif
 
-	/* recheck for dynamic ignore list entries if hostnames are in use */
-	if (dns_ignore_lookup)
-	{
-	    ilist_resolve();
-	}
+	    /* recheck for dynamic ignore list entries if hostnames are in use */
+	    if (dns_ignore_lookup)
+	    {
+		ilist_resolve();
+	    }
 
-	/* check route timestamp and remove expired routes */
-	for(i=0; i<RTSIZE; i++)
-	{
+	    /* check route timestamp and remove expired routes */
+	    for(i=0; i<RTSIZE; i++)
+	    {
 		if ((0 != routes[i].timestamp) && ((routes[i].timestamp + EXPTIME) < time(NULL)))
 		{
 			route_func(ROUTE_DEL, routes[i].address, routes[i].netmask, 0);
@@ -1489,22 +1519,79 @@ static void on_alarm(int sig)
 			count++;
 			updated = TRUE;
 		}
-	}
+	    }
 
 #ifdef HAVE_DEBUG
-	if (debug)
-	{
+	    if (debug)
+	    {
 		fprintf(stderr, "Routes expired: %d.\n", count);
 		fprintf(stderr, "Saving routes to disk.\n");
-	}
+	    }
 #endif
 
-	save_encap();
+	    save_encap();
 
 #ifdef HAVE_DEBUG
-	if (debug) fprintf(stderr, "(total %d entries).\n", list_count());
+	    if (debug) fprintf(stderr, "(total %d entries).\n", list_count());
 #endif
+	}
 
+	count = list_count();
+
+	if ((NULL != fwif) && (count > 0))
+	{
+#ifdef HAVE_DEBUG
+	    if (debug) fprintf(stderr, "Sending local RIP update.\n");
+#endif
+	    rip_nr = 0;
+	    route_nr = 0;
+
+	    memset((char *)&sin, 0, sizeof(sin));
+	    sin.sin_family = PF_INET;
+	    sin.sin_addr.s_addr = inet_addr(fwdest); 
+	    sin.sin_port = htons(IPPORT_ROUTESERVER);
+
+	    memset(&rp, 0, sizeof(rip_packet));
+	    rp.header.version = 2;
+	    rp.header.command = RIP_CMD_RESPONSE;
+
+	    while ((rip_nr < count) && (route_nr < RTSIZE))
+	    {
+		size = 0;
+		for (i = 0; i < 25; i++)
+		{
+		    while ((0 == routes[route_nr].address) && (route_nr < RTSIZE)) route_nr++;
+		    if (route_nr == RTSIZE)
+		    {
+			break;
+		    }
+
+		    if  (rip_nr < count)
+		    {
+			rp.entries[i].af = htons(RIP_AF_INET);
+			rp.entries[i].rtag = htons(44);
+			rp.entries[i].address = routes[route_nr].address;
+			rp.entries[i].mask = htonl(0xFFFFFFFFl << (32 - routes[route_nr].netmask));
+			rp.entries[i].nexthop = routes[route_nr].nexthop;
+			rp.entries[i].metric = htonl(2);
+			rip_nr ++;
+			route_nr++;
+			size++;
+		    }
+		    else
+		    {
+			break;
+		    }
+		}
+
+		sendto(fwsd, &rp, sizeof(rip_header) + size * sizeof(rip_entry), 0, (struct sockaddr *)&sin, sizeof(sin));
+
+	    }
+
+	}
+
+	/* resend local RIP data every 29 sec - this will prevent overlapping at 5 min with the AMPR RIP update */
+	alarm(29);
 }
 
 static void on_hup(int sig)
@@ -1742,11 +1829,6 @@ int main(int argc, char **argv)
 			close(tunsd);
 			return 1;
 		}
-		
-		memset((char *)&sin, 0, sizeof(sin));
-		sin.sin_family = PF_INET;
-		sin.sin_addr.s_addr = inet_addr(fwdest); 
-		sin.sin_port = htons(IPPORT_ROUTESERVER);
 	}
 
 	/* networking up and running */
@@ -1765,6 +1847,8 @@ int main(int argc, char **argv)
 	signal(SIGKILL, on_term);
 	signal(SIGHUP, on_hup);
 	signal(SIGALRM, on_alarm);
+
+	alarm(30);
 
 	/* daemon or debug */
 
@@ -1812,10 +1896,6 @@ int main(int argc, char **argv)
 			
 			process_message(pload, plen);
 			
-			if (NULL != fwif)
-			{
-			    sendto(fwsd, pload, plen, 0, (struct sockaddr *)&sin, sizeof(sin));
-			}
 		}
 	}
 

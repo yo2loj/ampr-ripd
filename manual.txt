@@ -90,6 +90,10 @@
  *    1.12    16.Nov.2014      Added the execution of a system command after route setting/change. This is done
  *                             on startup with encap file present and 30 seconds after RIP update if encap changes.
  *                             (Tnx. Rob, PE1CHL for the idea)
+ *    1.13    20.Nov.2014      Ignore subnets for which the gateway is inside their own subnet
+ *                             Reconstruct forwarded RIP messages to be able to send them even on ampr-gw outages
+ *                             Forwarded RIP messages do not use authentication anymore
+ *                             Forwarded RIP messages are sent 30 seconds after RIP update, otherwise every 29 seconds
 
  INSTALLATION
  ------------
