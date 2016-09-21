@@ -1,0 +1,84 @@
+.TH ampr-ripd "1" "September 2016" "ampr-ripd" "General Manual Commands"
+.SH NAME
+ampr-ripd \- routing daemon for AMPRNet gateways
+.SH SYNOPSIS
+.B ampr-ripd
+[\-?|\-h] [\-d] [\-v] [\-s] [\-r] [\-i <interface>] [\-a <ip|hostname|subnet>[,<ip|hostname|subnet>...]] [\-p <password>] [\-f <interface>] [\-e <ip>] [\-x <system command>]
+.br
+.SH DESCRIPTION
+AMPRnet is a RIPv4 Listener and route injector daemon used with AMPRnet gateways.
+.IP
+.SH OPTIONS
+.TP
+\-?, \fB\-h\fR
+Usage info
+.TP
+\fB\-d\fR
+Debug mode: no daemonization, verbose output
+.TP
+\fB\-v\fR
+More verbose debug output
+Using this option without debug leaves the console attached
+.TP
+\fB\-s\fR
+Save routes to \fI\,/var/lib/ampr\-ripd/encap.txt\/\fP (encap format),
+if this file exists, it will be loaded on startup regardless
+of this option
+.TP
+\fB\-r\fR
+Use raw socket instead of multicast
+.TP
+\fB\-i\fR <interface>
+Tunnel interface to use, defaults to tunl0
+.TP
+\fB\-t\fR <table>
+Routing table to use, defaults to 'main'
+.TP
+\fB\-a\fR
+<ip>[,<ip>...]    Comma separated list of IPs, hostnames or ampr subnets to be ignored.
+Subnets can be in full network/mask (e.g. 44.182.20.0/24) or encap (e.g. 44.182.20/24) format,
+but MUST match an entry in the RIP broadcast
+If a hostname is used, its IP will be re\-resolved 30 sec after every RIP broadcast.
+The List contains local interface IPs by default
+.TP
+\fB\-m\fR <metric>
+Metric to be used when setting routes.
+This is a numerical value from 0 to 255. Defaults to 0.
+.TP
+\fB\-w\fR <window>
+Sets the TCP window size to a given value (defaults to 840).
+This is needed since IP over AX.25 connections have small TCP window size.
+A value of 0 diables setting the window size (not recommended, default value should be ok)
+.TP
+\fB\-p\fR <password>
+RIPv2 password, defaults to the current valid password. Use only if the password should ever change
+.TP
+\fB\-f\fR <interface>
+Interface for RIP forwarding, defaults to none/disabled
+.TP
+\fB\-e\fR <ip>
+Forward destination IP, defaults to 224.0.0.9 if enabled
+.TP
+\fB\-x\fR <system command>
+Execute this system command after route set/change. If the command includes white spaces, use quotes.
+.TP
+.B Observation
+All routes are created with netlink protocol 44 for easy management
+.IP
+.SH SIGNALS
+.IP
+\- On signal SIG_HUP, ampr\-ripd will delete all set routes, but will remain active,
+so routes will be set again on next received RIPv2 set, and the saved encap file updated.
+.IP
+\- On signal SIG_TERM (exit), ampr\-ripd will delete all set routes and exit.
+.IP
+.SH DEBUG
+With the default debug level, using the \fB\-d\fR option,
+the daemon will stay in the foreground and allow you to find the RIPv2 password if needed
+(see the find_pass.sh shell script). To have full debug output, it has to be compiled with \fB\-D\fR HAVE_DEBUG or by uncommenting the right DOPT line.
+.SH AUTHOR
+Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
+.SH KNOWN ISSUES
+When using other table than 'main', interogating the routes via netlink does not work properly.
+This means that on any update, the route is deleted and then recreated, even if it is already set correctly.
+This should be no problem since this happen only at startup on encap loading and on route change.

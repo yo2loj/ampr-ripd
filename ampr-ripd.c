@@ -1,5 +1,5 @@
 /*
- * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.13
+ * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.14
  *
  * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
  *
@@ -24,7 +24,7 @@
  *          -a  <ip>[,<ip>...]    Comma separated list of IPs/hostnames or encap style entries to be ignored
  *                                (max. 10 hostnames or IPs, unlimited encap entries)
  *                                The list contains local interface IPs by default
- *          -p <password>         RIPv2 password, defaults to none
+ *          -p <password>         RIPv2 password, defaults to the current valid password
  *          -m <metric>           Use given route metric to set routes, defaults to 0
  *          -w <window>           Sets TCP window size to the given value
  *                                A value of 0 skips window setting. Defaults to 840
@@ -75,6 +75,9 @@
  *                          Reconstruct forwarded RIP messages to be able to send them even on ampr-gw outages
  *                          Forwarded RIP messages do not use authentication anymore
  *                          Forwarded RIP messages are sent 30 seconds after a RIP update, otherwise every 29 seconds
+ *    1.14   21.Sep.2016    Password is included in the daemon. Only need to set should it ever change
+ *                          (OK from Brian Kantor - Tnx.)
+ *                          Added man page courtesy of Ana C. Custura and the DebianHams
  */
 
 #include <stdlib.h>
@@ -101,7 +104,7 @@
 #include <time.h>
 #include <ctype.h>
 
-#define AMPR_RIPD_VERSION	"1.13"
+#define AMPR_RIPD_VERSION	"1.14"
 
 #define RTSIZE		1000	/* maximum number of route entries */
 #define EXPTIME		600	/* route expiration in seconds */
@@ -205,7 +208,7 @@ unsigned int tunaddr;
 char *ilist = NULL;
 uint32_t ignore_ip[MAXIGNORE];
 
-char *passwd = NULL;
+char *passwd = "pLaInTeXtpAsSwD";
 char *table = NULL;
 int nrtable;
 uint32_t rmetric = 0;
@@ -1204,51 +1207,38 @@ void route_set_all(void)
 	updated = FALSE;
 }
 
-int process_auth(char *buf, int len, int needed)
+int process_auth(char *buf, int len)
 {
 	rip_auth *auth = (rip_auth *)buf;
 
-	if (needed)
+	if (auth->auth != 0xFFFF)
 	{
-		if (auth->auth != 0xFFFF)
-		{
 #ifdef HAVE_DEBUG
-			if (debug) fprintf(stderr, "Password auth requested but no password found in first RIPv2 message.\n");
+		if (debug) fprintf(stderr, "Password auth requested but no password found in first RIPv2 message.\n");
 #endif
-			return -1;
-		}
-		if (ntohs(auth->type) != RIP_AUTH_PASSWD)
-		{
+		return -1;
+	}
+	if (ntohs(auth->type) != RIP_AUTH_PASSWD)
+	{
 #ifdef HAVE_DEBUG
-			if (debug) fprintf(stderr, "Unsupported authentication type %d.\n", ntohs(auth->type));
+		if (debug) fprintf(stderr, "Unsupported authentication type %d.\n", ntohs(auth->type));
 #endif
-			return -1;
-		}
+		return -1;
+	}
 
-		if (strcmp((char *)auth->pass, passwd) != 0)
-		{
-#ifdef HAVE_DEBUG
-			if (debug) fprintf(stderr, "Invalid password.\n");
-#endif
-			return -1;
-		}
-	}
-	else
+	if (strcmp((char *)auth->pass, passwd) != 0)
 	{
-		if (auth->auth == 0xFFFF)
-		{
 #ifdef HAVE_DEBUG
-			if (debug) fprintf(stderr, "Password found in first RIPv2 message but not set.\n");
+		if (debug) fprintf(stderr, "Invalid password.\n");
 #endif
-			
-			if (ntohs(auth->type) == RIP_AUTH_PASSWD)
-			{
-				if (debug) fprintf(stderr, "Simple password: %s\n", auth->pass);
-			}
-			return -1;
-		}
-	
+		return -1;
 	}
+
+	if (ntohs(auth->type) == RIP_AUTH_PASSWD)
+	{
+		if (debug) fprintf(stderr, "Simple password: %s\n", auth->pass);
+	}
+
 	return 0;
 }
 
@@ -1411,29 +1401,19 @@ int process_message(char *buf, int len)
 
 	/* check password if defined */
 
-	if (passwd != NULL)
+	if (-1 == process_auth(buf, len))
 	{
-		if (-1 == process_auth(buf, len, TRUE))
-		{
-			return -1;
-		}
+		return -1;
+	}
 
 #ifdef HAVE_DEBUG
-		if (debug) fprintf(stderr, "Simple password authentication successful.\n");
+	if (debug) fprintf(stderr, "Simple password authentication successful.\n");
 #endif
-		
-		buf += RIP_ENTRY_LEN;
-		len -= RIP_ENTRY_LEN;
-	}
-	else
-	{
-		if (-1 == process_auth(buf, len, FALSE))
-		{
-			return -1;
-		}
-	}
+	
+	buf += RIP_ENTRY_LEN;
+	len -= RIP_ENTRY_LEN;
 
-	/* simple auth ok if needed or not used */
+	/* simple auth ok */
 
 	if (len == 0)
 	{

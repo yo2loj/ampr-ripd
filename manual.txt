@@ -30,7 +30,7 @@
           -w <window>           Sets the TCP window size to a given value (defaults to 840).
                                 This is needed since IP over AX.25 connections have small TCP window size.
                                 A value of 0 diables setting the window size (not recommended, default value should be ok)
-          -p <password>         RIPv2 password, defaults to none
+          -p <password>         RIPv2 password, defaults to the current valid password
           -f <interface>        Interface for RIP forwarding, defaults to none/disabled
           -e <ip>               Forward destination IP, defaults to 224.0.0.9 if enabled
           -x <system command>   Execute this system command after route set/change. If the command includes white spaces, use quotes.
@@ -94,6 +94,9 @@
  *                             Reconstruct forwarded RIP messages to be able to send them even on ampr-gw outages
  *                             Forwarded RIP messages do not use authentication anymore
  *                             Forwarded RIP messages are sent 30 seconds after RIP update, otherwise every 29 seconds
+ *    1.14    21.Sep.2016      Password is included in the daemon. Only need to set it sould it ever change
+ *                             (OK from Brian Kantor - Tnx.)
+ *                             Added man page courtesy of Ana C. Custura and the DebianHams
 
  INSTALLATION
  ------------
