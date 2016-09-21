@@ -1,5 +1,5 @@
 /*
- * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.14
+ * ampr-ripd.c - AMPR 44net RIPv2 Listner Version 1.15
  *
  * Author: Marius Petrescu, YO2LOJ, <marius@yo2loj.ro>
  *
@@ -18,7 +18,7 @@
  *          -s                    Save routes to /var/lib/ampr-ripd/encap.txt (encap format),
  *                                If this file exists, it will be loaded on startup regardless
  *                                of this option
- *          -r                    Use raw socket instead of multicast
+ *          -r                    Compatibility only (ignored, raw sockets are always used)
  *          -i <interface>        Tunnel interface to use, defaults to 'tunl0'
  *          -t <table>            Routing table to use, defaults to 'main'
  *          -a  <ip>[,<ip>...]    Comma separated list of IPs/hostnames or encap style entries to be ignored
@@ -78,6 +78,7 @@
  *    1.14   21.Sep.2016    Password is included in the daemon. Only need to set should it ever change
  *                          (OK from Brian Kantor - Tnx.)
  *                          Added man page courtesy of Ana C. Custura and the DebianHams
+ *    1.15   21.Sep.2016    Removed multicast access mode, now only raw sockets are used
  */
 
 #include <stdlib.h>
@@ -104,7 +105,7 @@
 #include <time.h>
 #include <ctype.h>
 
-#define AMPR_RIPD_VERSION	"1.14"
+#define AMPR_RIPD_VERSION	"1.15"
 
 #define RTSIZE		1000	/* maximum number of route entries */
 #define EXPTIME		600	/* route expiration in seconds */
@@ -201,7 +202,6 @@ static char *usage_string = "\nAMPR RIPv2 daemon " AMPR_RIPD_VERSION "by Marius,
 int debug = FALSE;
 int verbose = FALSE;
 int save = FALSE;
-int raw = FALSE;
 char *tunif = "tunl0";
 unsigned int tunidx = 0;
 unsigned int tunaddr;
@@ -1589,7 +1589,6 @@ int main(int argc, char **argv)
 	int p;
 
 	struct sockaddr_in sin;
-	struct group_req group;
 	
 	char databuf[BUFFERSIZE];
 	char *pload;
@@ -1610,7 +1609,7 @@ int main(int argc, char **argv)
 			save = TRUE;
 			break;
 		case 'r':
-			raw = TRUE;
+			/* ignore */
 			break;
 		case 'i':
 			tunif = optarg;
@@ -1689,91 +1688,16 @@ int main(int argc, char **argv)
 
 	route_set_all();
 
-	if (TRUE == raw)
+	/* create multicast listen socket on tunnel */
+
+#ifdef HAVE_DEBUG
+	if (debug) fprintf(stderr, "Creating RIP UDP listening socket.\n");
+#endif
+
+	if ((tunsd = socket(PF_INET, SOCK_RAW, 4)) < 0)
 	{
-	    /* create multicast listen socket on tunnel */
-
-#ifdef HAVE_DEBUG
-	    if (debug) fprintf(stderr, "Creating RIP UDP listening socket.\n");
-#endif
-
-	    if ((tunsd = socket(PF_INET, SOCK_RAW, 4)) < 0)
-	    {
-		PERROR("Raw socket");
+	    PERROR("Raw socket");
 		return 1;
-	    }
-	}
-	else
-	{
-	
-	    /* create multicast listen socket on tunnel */
-
-#ifdef HAVE_DEBUG
-	    if (debug) fprintf(stderr, "Creating RIP UDP listening socket.\n");
-#endif
-
-	    if ((tunsd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0)
-	    {
-		PERROR("Tunnel socket");
-		return 1;
-	    }
-
-#ifdef HAVE_DEBUG
-	    if (debug && verbose) fprintf(stderr, "Setting up multicast interface.\n");
-#endif
-
-	    int reuse = 1;
-	    if (setsockopt(tunsd, SOL_SOCKET, SO_REUSEADDR, (char *)&reuse, sizeof(reuse)) < 0)
-	    {
-		PERROR("Tunnel socket: Setting SO_REUSEADDR");
-		close(tunsd);
-		return 1;
-	    }
-
-	    if (setsockopt(tunsd, SOL_SOCKET, SO_BINDTODEVICE, tunif, strlen(tunif)) < 0)
-	    {
-		PERROR("Tunnel socket: Setting SO_BINDTODEVICE");
-		close(tunsd);
-		return 1;
-	    }
-
-	    set_multicast(tunsd, tunif);
-
-	    memset((char *)&sin, 0, sizeof(sin));
-	    sin.sin_family = PF_INET;
-	    sin.sin_addr.s_addr = INADDR_ANY; /* mandatory INADDR_ANY for multicast */
-	    sin.sin_port = htons(IPPORT_ROUTESERVER);
-
-	    if (bind(tunsd, (struct sockaddr *)&sin, sizeof(sin)))
-	    {
-		PERROR("Tunnel socket: Bind");
-		close(tunsd);
-		return 1;
-	    }
-
-	    /* disable loopback */
-	    int loop = 0;
-	    if (setsockopt(tunsd, IPPROTO_IP, IP_MULTICAST_LOOP, (char *)&loop, sizeof(loop)) < 0)
-	    {
-		PERROR("Tunnel socket: Disable loopback");
-		close(tunsd);
-		return 1;
-	    }
-
-	    /* join multicast group 224.0.0.9 */
-	    memset((char *)&group, 0, sizeof(group));
-	    memset((char *)&sin, 0, sizeof(sin));
-	    sin.sin_family = AF_INET;
-	    sin.sin_addr.s_addr = inet_addr("224.0.0.9");
-	    memcpy(&group.gr_group, &sin, sizeof(sin));
-	    group.gr_interface = tunidx;
-
-	    if (setsockopt(tunsd, IPPROTO_IP, MCAST_JOIN_GROUP, (char *)&group, sizeof(group)) < 0)
-	    {
-		PERROR("Tunnel socket: join multicast");
-		close(tunsd);
-		return 1;
-	    }
 	}
 
 	if (NULL != fwif)
@@ -1843,10 +1767,8 @@ int main(int argc, char **argv)
 		}
 		else
 		{
-			if (TRUE == raw)
+			if (len >= 48 + (RIP_HDR_LEN + RIP_ENTRY_LEN))
 			{
-			    if (len >= 48 + (RIP_HDR_LEN + RIP_ENTRY_LEN))
-			    {
 				struct iphdr *iph = (struct iphdr *)(databuf + 20);
 				struct udphdr *udh = (struct udphdr *)(databuf + 40);
 			
@@ -1862,16 +1784,10 @@ int main(int argc, char **argv)
 				{
 				    continue;
 				}
-			    }
-			    else
-			    {
-				continue;
-			    }
 			}
 			else
 			{
-			    pload = databuf;
-			    plen = len;
+				continue;
 			}
 			
 			process_message(pload, plen);

@@ -17,7 +17,7 @@
           -s                    Save routes to /var/lib/ampr-ripd/encap.txt (encap format),
                                 if this file exists, it will be loaded on startup regardless
                                 of this option
-          -r                    Use raw socket instead of multicast
+          -r                    Compatibility only (ignored, raw sockets are always used)
           -i <interface>        Tunnel interface to use, defaults to tunl0
           -t <table>            Routing table to use, defaults to 'main'
           -a  <ip>[,<ip>...]    Comma separated list of IPs, hostnames or ampr subnets to be ignored.
@@ -97,6 +97,7 @@
  *    1.14    21.Sep.2016      Password is included in the daemon. Only need to set it sould it ever change
  *                             (OK from Brian Kantor - Tnx.)
  *                             Added man page courtesy of Ana C. Custura and the DebianHams
+ *    1.15    21.Sep.2016      Removed multicast access mode, now only raw sockets are used
 
  INSTALLATION
  ------------

@@ -14,7 +14,5 @@
 # - all received RIPv2 multicasts are forwarded to interface eth0 as multicasts (drop this if not needed)...
 # - all routes set by ampr-ripd are saved to /var/lib/ampr-ripd/routes (example of external system command)
 #
-# IF YOUR SYSTEM DOES NOT SUPPORT MULTICAST, ADD THE '-r' OPTION
-#
 
 /usr/sbin/ampr-ripd -s -i ampr0 -m 50 -a 193.0.0.1 -f eth0 -x "ip route | grep 'proto 44' >/var/lib/ampr-ripd/routes"
