@@ -23,11 +23,10 @@ CC = gcc
 # Full debug
 #DOPT = -Wall -O2 -D HAVE_DEBUG
 
-COPT = -Wall -O2
-LOPT =
-
+CFLAGS ?= -Wall -O2
+LDFLAGS ?=
 ampr-ripd:	ampr-ripd.c
-	$(CC) $(COPT) $(DOPT) $(LOPT) -o ampr-ripd ampr-ripd.c
+	$(CC) $(CFLAGS) $(DOPT) $(LDFLAGS) $(CPPFLAGS) -o ampr-ripd ampr-ripd.c
 
 all:	ampr-ripd
 
